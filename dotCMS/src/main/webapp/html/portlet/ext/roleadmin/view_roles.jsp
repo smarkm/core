@@ -57,7 +57,7 @@
 	<form id="newLayoutForm" dojoType="dijit.form.Form">
 		<ul id="addLayoutErrorMessagesList"></ul>
 		<dl>
-			<dt><%= LanguageUtil.get(pageContext, "Name") %>:</dt>
+			<dt><%= LanguageUtil.get(pageContext, "Tool-Group") %>:</dt>
 			<dd><input id="layoutName" type="text" maxlength="255" required="true" invalidMessage="Required." dojoType="dijit.form.ValidationTextBox" /></dd>
 			<dt><a href="#" id="tip-icon"><span class="hintIcon"></span></a> <%= LanguageUtil.get(pageContext, "Icon") %>: 
 			    <span dojoType="dijit.Tooltip" connectId="tip-icon" position="above" style="width:100px;">
