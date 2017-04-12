@@ -830,5 +830,7 @@ public interface PermissionAPI {
      */
 	void checkPermission(Permissionable permissionable, PermissionLevel level, User user) throws DotSecurityException;
 
+	Permissionable resolvePermissionable(final String id, final User user,
+										 final Long language, final boolean respectFrontendRoles) throws DotDataException, DotSecurityException;
 
 }

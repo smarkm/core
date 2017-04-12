@@ -1,26 +1,15 @@
 package com.dotmarketing.business;
 
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.Iterator;
-import java.util.List;
-import java.util.Map;
-import java.util.Map.Entry;
-import java.util.Set;
-import java.util.SortedSet;
-import java.util.TreeSet;
-
 import com.dotcms.api.system.event.Payload;
 import com.dotcms.api.system.event.SystemEventType;
 import com.dotcms.api.system.event.SystemEventsAPI;
 import com.dotcms.api.system.event.Visibility;
+import com.dotcms.contenttype.transform.contenttype.StructureTransformer;
 import com.dotcms.repackage.com.google.common.annotations.VisibleForTesting;
-import com.dotmarketing.beans.Host;
-import com.dotmarketing.beans.Inode;
-import com.dotmarketing.beans.Permission;
-import com.dotmarketing.beans.WebAsset;
+import com.dotcms.repackage.com.google.common.collect.ImmutableBiMap;
+import com.dotcms.uuid.shorty.ShortType;
+import com.dotcms.uuid.shorty.ShortyId;
+import com.dotmarketing.beans.*;
 import com.dotmarketing.exception.DotDataException;
 import com.dotmarketing.exception.DotRuntimeException;
 import com.dotmarketing.exception.DotSecurityException;
@@ -34,14 +23,16 @@ import com.dotmarketing.portlets.htmlpageasset.model.IHTMLPage;
 import com.dotmarketing.portlets.links.model.Link;
 import com.dotmarketing.portlets.structure.model.Structure;
 import com.dotmarketing.portlets.templates.model.Template;
-import com.dotmarketing.util.AdminLogger;
-import com.dotmarketing.util.Config;
-import com.dotmarketing.util.InodeUtils;
-import com.dotmarketing.util.Logger;
-import com.dotmarketing.util.UtilMethods;
+import com.dotmarketing.util.*;
 import com.liferay.portal.NoSuchRoleException;
 import com.liferay.portal.model.User;
 import com.liferay.portal.util.PortalUtil;
+
+import java.util.*;
+import java.util.Map.Entry;
+
+import static com.dotcms.util.CollectionsUtils.entry;
+import static com.dotcms.util.CollectionsUtils.mapEntries;
 
 /**
  * PermissionAPI is an API intended to be a helper class for class to get Permissions.  Classes within the dotCMS
@@ -52,6 +43,8 @@ import com.liferay.portal.util.PortalUtil;
  */
 public class PermissionBitAPIImpl implements PermissionAPI {
 
+	private final Map<String, PermissionableResolver> classPermissionableByINodeIdMap;
+	private final Map<String, PermissionableResolver> classPermissionableByIdentifierMap;
 
 	PermissionFactory permissionFactory;
 	private SystemEventsAPI systemEventsAPI;
@@ -68,6 +61,8 @@ public class PermissionBitAPIImpl implements PermissionAPI {
 	public PermissionBitAPIImpl(PermissionFactory serviceRef, SystemEventsAPI systemEventsAPI) {
 		setPermissionFactory(serviceRef);
 		this.systemEventsAPI = systemEventsAPI;
+		this.classPermissionableByINodeIdMap = getClassPermissionableByINodeIdMap();
+		this.classPermissionableByIdentifierMap = getClassPermissionableByIdentifierMap();
 	}
 
 
@@ -1561,5 +1556,132 @@ public class PermissionBitAPIImpl implements PermissionAPI {
 		return permissionFactory.isInheritingPermissions(permissionable);
 	}
 
-}
+	@Override
+	public Permissionable resolvePermissionable(final String id, final User user,
+												final Long language, final boolean respectFrontendRoles) throws DotDataException, DotSecurityException {
 
+		Permissionable permissionable = null;
+
+		Optional<ShortyId> shortOpt = APILocator.getShortyAPI().getShorty(id);
+		String typeCanonicalName = PermissionAPI.permissionTypes.get(shortOpt.get().subType.name().toUpperCase());
+
+		if ( ShortType.INODE == shortOpt.get().type ) {
+
+			PermissionableResolver resolver = this.getPermissionableResolverForINode(typeCanonicalName);
+			if ( null != resolver ) {
+				permissionable = resolver.resolve(id, null, user, respectFrontendRoles);
+			} else {
+				throw new DotDataException
+						("Resolver not found for class [" + typeCanonicalName + "] and id [" + id + "]");
+			}
+
+		} else if ( ShortType.IDENTIFIER == shortOpt.get().type ) {
+
+			PermissionableResolver resolver = this.getPermissionableResolverForIdentifier(typeCanonicalName);
+			if ( null != resolver ) {
+				permissionable = resolver.resolve(id, language, user, respectFrontendRoles);
+			} else {
+				throw new DotDataException
+						("Resolver not found for class [" + typeCanonicalName + "] and id [" + id + "]");
+			}
+		}
+
+		return permissionable;
+	}
+
+	private PermissionableResolver getPermissionableResolverForINode(final String canonicalName) {
+
+		PermissionableResolver permissionableResolver = null;
+
+		if ( this.classPermissionableByINodeIdMap.containsKey(canonicalName) ) {
+			permissionableResolver = this.classPermissionableByINodeIdMap.get(canonicalName);
+		}
+
+		return permissionableResolver;
+	}
+
+	/**
+	 * Returns the mapping for the Inode class permissionable.
+	 *
+	 * @return Map
+	 */
+	protected Map<String, PermissionableResolver> getClassPermissionableByINodeIdMap() {
+
+		final Map<String, PermissionableResolver> defaultEntries = mapEntries(
+				entry(PermissionableType.HTMLPAGES.getCanonicalName(), (id, language, user, respectFrontendRoles) -> {
+					Contentlet foundContentlet = APILocator.getContentletAPI().find(id, user, respectFrontendRoles);
+					if ( null != foundContentlet ) {
+						return APILocator.getHTMLPageAssetAPI().fromContentlet(foundContentlet);
+					}
+
+					return null;
+				}),
+				entry(PermissionableType.CONTAINERS.getCanonicalName(), (id, language, user, respectFrontendRoles) -> APILocator.getContainerAPI().find(id, user, respectFrontendRoles)),
+				entry(PermissionableType.FOLDERS.getCanonicalName(), (id, language, user, respectFrontendRoles) -> APILocator.getFolderAPI().find(id, user, respectFrontendRoles)),
+				//entry(PermissionableType.LINKS.getCanonicalName(), (id, language, user, respectFrontendRoles) -> APILocator.getVirtualLinkAPI().typeDAO.findByInode(id, Link.class)),
+				entry(PermissionableType.TEMPLATES.getCanonicalName(), (id, language, user, respectFrontendRoles) -> APILocator.getTemplateAPI().find(id, user, respectFrontendRoles)),
+				//entry(PermissionableType.TEMPLATE_LAYOUTS.getCanonicalName(), (id, language, user, respectFrontendRoles) -> APILocator.getTemplateAPI().this.templateAPI.find(id, user, respectFrontendRoles)),
+				entry(PermissionableType.STRUCTURES.getCanonicalName(), (id, language, user, respectFrontendRoles) -> new StructureTransformer(APILocator.getContentTypeAPI(user).find(id)).asStructure()),
+				entry(PermissionableType.CONTENTLETS.getCanonicalName(), (id, language, user, respectFrontendRoles) -> APILocator.getContentletAPI().find(id, user, respectFrontendRoles)),
+				entry(PermissionableType.CATEGORY.getCanonicalName(), (id, language, user, respectFrontendRoles) -> APILocator.getCategoryAPI().find(id, user, respectFrontendRoles)),
+				entry(PermissionableType.RULES.getCanonicalName(), (id, language, user, respectFrontendRoles) -> APILocator.getRulesAPI().getRuleById(id, user, respectFrontendRoles))
+		);
+
+		return new ImmutableBiMap.Builder<String, PermissionableResolver>().putAll(defaultEntries).build();
+	}
+
+	private PermissionableResolver getPermissionableResolverForIdentifier(final String canonicalName) {
+
+		PermissionableResolver permissionableResolver = null;
+
+		if ( this.classPermissionableByIdentifierMap.containsKey(canonicalName) ) {
+			permissionableResolver = this.classPermissionableByIdentifierMap.get(canonicalName);
+		}
+
+		return permissionableResolver;
+	}
+
+	/**
+	 * Returns the mapping for the Identifier class permissionable.
+	 *
+	 * @return Map
+	 */
+	protected Map<String, PermissionableResolver> getClassPermissionableByIdentifierMap() {
+
+		final Map<String, PermissionableResolver> defaultEntries = mapEntries(
+				entry(PermissionableType.HTMLPAGES.getCanonicalName(), (id, language, user, respectFrontendRoles) -> APILocator.getContentletAPI().findContentletByIdentifier(id, false, (null != language) ? language : 0, user, respectFrontendRoles)),
+				entry(PermissionableType.CONTAINERS.getCanonicalName(), (id, language, user, respectFrontendRoles) -> APILocator.getContainerAPI().getWorkingContainerById(id, user, respectFrontendRoles)),
+				entry(PermissionableType.FOLDERS.getCanonicalName(), (id, language, user, respectFrontendRoles) -> {
+					Identifier foundIdentifier = APILocator.getIdentifierAPI().find(id);
+					if ( null != foundIdentifier ) {
+						return APILocator.getFolderAPI().findFolderByPath(foundIdentifier.getPath(), foundIdentifier.getHostId(), user, respectFrontendRoles);
+					}
+
+					return null;
+				}),
+				//entry(PermissionableType.LINKS.getCanonicalName(), (id, language, user, respectFrontendRoles) -> this.typeDAO.findFirstInodeByIdentifier(id)),
+				entry(PermissionableType.CONTENTLETS.getCanonicalName(), (id, language, user, respectFrontendRoles) -> APILocator.getContentletAPI().findContentletByIdentifier(id, false, language, user, respectFrontendRoles)),
+				entry(PermissionableType.TEMPLATES.getCanonicalName(), (id, language, user, respectFrontendRoles) -> APILocator.getTemplateAPI().findWorkingTemplate(id, user, respectFrontendRoles))
+		);
+
+		return new ImmutableBiMap.Builder<String, PermissionableResolver>().putAll(defaultEntries).build();
+	}
+
+	/**
+	 * Permissionable Resolver is a class that resolve based on id (could be an identifier or inode id)
+	 */
+	private interface PermissionableResolver {
+
+		/**
+		 * Resolve the {@link Permissionable}
+		 *
+		 * @param id
+		 * @param language
+		 * @param user
+		 * @param respectFrontendRoles
+		 * @return
+		 */
+		Permissionable resolve(String id, Long language, User user, boolean respectFrontendRoles) throws DotDataException, DotSecurityException;
+	}
+
+}
