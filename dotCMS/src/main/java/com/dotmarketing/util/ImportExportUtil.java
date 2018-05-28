@@ -843,7 +843,7 @@ public class ImportExportUtil {
         }
 
         MaintenanceUtil.flushCache();
-        ReindexThread.startThread(Config.getIntProperty("REINDEX_THREAD_SLEEP", 500), Config.getIntProperty("REINDEX_THREAD_INIT_DELAY", 5000));
+        //ReindexThread.startThread(Config.getIntProperty("REINDEX_THREAD_SLEEP", 500), Config.getIntProperty("REINDEX_THREAD_INIT_DELAY", 5000));
 
         ContentletAPI conAPI = APILocator.getContentletAPI();
         Logger.info(this, "Building Initial Index");
@@ -890,8 +890,9 @@ public class ImportExportUtil {
             }
             counter++;
         }
-        Logger.info(this, "Finished Building Initial Index");
+
         ReindexThread.stopThread();
+        Logger.info(this, "Finished Building Initial Index");
 
         CacheLocator.getCacheAdministrator().flushAll();
         MaintenanceUtil.deleteStaticFileStore();

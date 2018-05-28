@@ -297,7 +297,7 @@ public class ESDistributedJournalFactoryImpl<T> extends DistributedJournalFactor
         try {
 
             //Get the number of records to fetch
-            int recordsToFetch = Config.getIntProperty("REINDEX_RECORDS_TO_FETCH", 50);
+            int recordsToFetch = Config.getIntProperty("REINDEX_RECORDS_TO_FETCH", 200);
             int priorityLevel = REINDEX_JOURNAL_PRIORITY_NEWINDEX;
             if (includeFailedRecords) {
             	priorityLevel = REINDEX_JOURNAL_PRIORITY_FAILED_FIRST_ATTEMPT + (RETRY_FAILED_INDEX_TIMES);

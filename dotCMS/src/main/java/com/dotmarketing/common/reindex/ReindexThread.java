@@ -1,20 +1,25 @@
 package com.dotmarketing.common.reindex;
 
+import com.dotcms.content.business.DotMappingException;
+import com.dotcms.content.elasticsearch.business.ESMappingAPIImpl;
+import com.dotcms.content.elasticsearch.business.IndiciesAPI.IndiciesInfo;
+import com.dotcms.tika.TikaUtils;
+import com.google.gson.Gson;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
-import java.util.Iterator;
+import java.util.HashSet;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
 
-import org.elasticsearch.action.ActionListener;
-import org.elasticsearch.action.bulk.BulkItemResponse;
-import org.elasticsearch.action.bulk.BulkRequestBuilder;
+import java.util.concurrent.TimeUnit;
+import org.elasticsearch.action.bulk.BulkProcessor;
+import org.elasticsearch.action.bulk.BulkRequest;
 import org.elasticsearch.action.bulk.BulkResponse;
-import org.elasticsearch.client.Client;
+import org.elasticsearch.action.index.IndexRequest;
 
 import com.dotcms.api.system.event.Visibility;
 import com.dotcms.business.CloseDBIfOpened;
@@ -48,6 +53,7 @@ import com.dotmarketing.util.Logger;
 import com.dotmarketing.util.UtilMethods;
 import com.liferay.portal.language.LanguageException;
 import com.liferay.portal.model.User;
+import org.elasticsearch.common.xcontent.XContentType;
 
 /**
  * This thread is in charge of re-indexing the contenlet information placed in
@@ -97,9 +103,9 @@ public class ReindexThread extends Thread {
     public static final int REINDEX_THREAD_INIT_DELAY_DEFAULT_VALUE = 5000;
     
 	private static final ContentletIndexAPI indexAPI = APILocator.getContentletIndexAPI();
-    private final LinkedList<IndexJournal<String>> remoteQ = new LinkedList<IndexJournal<String>>();
-    private final LinkedList<IndexJournal<String>> remoteDelQ = new LinkedList<IndexJournal<String>>();
-    private final CopyOnWriteArrayList<String> notifiedFailingRecords = new CopyOnWriteArrayList<String>();
+    private final LinkedList<IndexJournal<String>> remoteQ = new LinkedList<>();
+    private final LinkedList<IndexJournal<String>> remoteDelQ = new LinkedList<>();
+    private final CopyOnWriteArrayList<String> notifiedFailingRecords = new CopyOnWriteArrayList<>();
 	private final DistributedJournalAPI<String> jAPI;
 	private final NotificationAPI notificationAPI;
 	private final RoleAPI roleAPI;
@@ -107,14 +113,14 @@ public class ReindexThread extends Thread {
 
 	private static ReindexThread instance;
 
+	private BulkProcessor processor;
+
 	private boolean start = false;
 	private boolean work = false;
 	private int sleep = 100;
 	private int delay = 7500;
 	private int delayOnError = 500;
 	private int failedAttemptsCount = 0;
-	private boolean reindexSleepDuringIndex = false;
-	private int reindexSleepDuringIndexTime = 0;
 
 	public ReindexThread() {
 
@@ -251,11 +257,15 @@ public class ReindexThread extends Thread {
 					    fillRemoteQ();
 
 					if(remoteQ.size()==0 && ESReindexationProcessStatus.inFullReindexation() && jAPI.recordsLeftToIndexForServer()==0) {
+
+						processor.awaitClose(15L, TimeUnit.SECONDS);
+
 						// The re-indexation process has finished successfully
 						reindexSwitchover(false);
 
                         //Generate and send an user notification
 						sendNotification("notification.reindexing.success", null, null, false);
+
 					} else if (remoteQ.size() == 0 && ESReindexationProcessStatus.inFullReindexation()
 							&& jAPI.recordsLeftToIndexForServer() > 0) {
 						// Fill the re-index queue with failed records now after
@@ -264,11 +274,14 @@ public class ReindexThread extends Thread {
 					}
 
 					if(!remoteDelQ.isEmpty()) {
+
 					    synchronized(remoteDelQ) {
 				            try {
 				                List<IndexJournal<String>> toDelete=remoteDelQ;
-				                if(toDelete.size()>=200) {
-				                    toDelete=remoteDelQ.subList(0, 200);
+
+				                int maxRecordsToDelete = Config.getIntProperty("REINDEX_RECORDS_TO_FETCH", 200);
+				                if(toDelete.size()>=maxRecordsToDelete) {
+				                    toDelete=remoteDelQ.subList(0, maxRecordsToDelete);
 				                }
 
 								//Delete from the dist_reindex_journal the records that were successfully indexed.
@@ -289,56 +302,18 @@ public class ReindexThread extends Thread {
 					}
 					else if(!remoteQ.isEmpty()) {
 					    wait=false;
-					    Client client=new ESClient().getClient();
-						BulkRequestBuilder bulk=client.prepareBulk();
+
 						final ArrayList<IndexJournal<String>> recordsToDelete= new ArrayList<>();
 						while(!remoteQ.isEmpty()) {
 
 							IndexJournal<String> idx = remoteQ.removeFirst();
 
 							try {
-								writeDocumentToIndex(bulk, idx);
+								writeDocumentToIndex(idx);
 							} catch ( Exception e ) {
 
 								Logger.error(this, "Unable to index record with id [" + idx.getIdentToIndex() + "]", e);
-
-								//Counts the failed attempts when indexing and handles error notifications
-								addIndexingFailedAttempt();
-
-								try {
-									/*
-									Reset to null the server id of the failed records in the reindex journal table
-									in order to make them available again for the reindex process.
-									 */
-									List<IndexJournal<String>> failedRecords = new ArrayList<>();
-									failedRecords.add(idx);
-									jAPI.resetServerForReindexEntry(failedRecords);
-								} catch ( DotDataException dataException ) {
-									Logger.error(this, "Error adding back failed records to reindex queue", dataException);
-								}
-								// The total number of re-tries minus 1 will
-								// indicate the last opportunity of a record to
-								// be re-indexed.
-								int totalAttempts = (DistributedJournalFactory.REINDEX_JOURNAL_PRIORITY_FAILED_FIRST_ATTEMPT + DistributedJournalFactory.RETRY_FAILED_INDEX_TIMES);
-								String identToIndex = idx.getIdentToIndex();
-								if (!this.notifiedFailingRecords.contains(identToIndex) && idx.getPriority() >= totalAttempts) {
-									// The record was not able to be re-indexed,
-									// so a notification will be generated and
-									// the record will not be processed anymore
-									String msg = "Could not re-index record with the Identifier '"
-											+ identToIndex
-											+ "'. The record is in a bad state or can be associated to orphaned records. You can try running the Fix Assets Inconsistencies tool and re-start the reindex.";
-
-                                    //Generate and send an user notification
-									sendNotification("notification.reindexing.error.processrecord", new Object[] {identToIndex}, msg, true);
-									this.notifiedFailingRecords.add(identToIndex);
-								}
-
-								try {
-									Thread.sleep(delayOnError);
-								} catch ( InterruptedException ie ) {
-									Logger.error(this, ie.getMessage(), ie);
-								}
+								manageFailedAttempt(idx);
 
 								/*
 								This continue will avoid to remove this failed record from the index journal table so
@@ -346,161 +321,10 @@ public class ReindexThread extends Thread {
 								 */
 								continue;
 							}
-
 							recordsToDelete.add(idx);
-
-							//If the REINDEX_SLEEP_DURING_INDEX was set
-							if ( reindexSleepDuringIndex ) {
-								try {
-									int sleepTime = getReindexSleepDuringIndexTime();
-									Thread.sleep(sleepTime);
-								} catch ( InterruptedException e ) {
-									Logger.error(this, e.getMessage(), e);
-								}
-							}
-
 						}
 
-						HibernateUtil.closeSession();
-
-				        if(bulk.numberOfActions()>0) {
-				            bulk.execute(new ActionListener<BulkResponse>() {
-
-								void handleRecords (List<IndexJournal<String>> failedRecords) {
-
-									//List of records to delete from the reindex journal table
-									addRecordsToDelete(recordsToDelete);
-
-									try {
-										if ( failedRecords != null && !failedRecords.isEmpty() ) {
-											/*
-											Reset to null the server id of the failed records in the reindex journal table
-											in order to make them available again for the reindex process.
-											 */
-											jAPI.resetServerForReindexEntry(failedRecords);
-										}
-									} catch ( DotDataException e ) {
-										Logger.error(this, "Error adding back failed records to reindex queue", e);
-									}
-								}
-
-								public void onResponse ( BulkResponse resp ) {
-
-									//Handle failures on the re-index process if any
-									List<IndexJournal<String>> failedRecords = failureHandler(resp);
-
-									//Handle the processed records
-									handleRecords(failedRecords);
-								}
-
-								public void onFailure ( Exception ex ) {
-
-									Logger.error(ReindexThread.class, "Indexing process failed", ex);
-
-									//Handle the processed records
-									handleRecords(null);
-
-									//Reset the failed attempts count as the onFailure will finish the indexing process
-									failedAttemptsCount = 0;
-								}
-
-								/**
-								 * Checks if we had failures when indexing, on failure we will retry the indexing process of the records that failed,
-								 * the process WON'T continue with failed records.
-								 *
-								 * @param resp
-								 */
-								private List<IndexJournal<String>> failureHandler ( BulkResponse resp ) {
-
-									//List of records that failed and will be added to the queue for more attempts
-									List<IndexJournal<String>> failedRecords = new ArrayList<>();
-
-									//Verify if we have failures to handle
-									if ( resp.hasFailures() && isWorking() ) {
-
-										Logger.error(this, "Error indexing content [" + resp.buildFailureMessage() + "]");
-
-										//Counts the failed attempts when indexing and handles error notifications
-										addIndexingFailedAttempt();
-
-										//Search for the failed items
-										for ( BulkItemResponse itemResponse : resp.getItems() ) {
-
-											//Check if the indexing process failed for this item
-											if ( itemResponse.isFailed() ) {
-
-												//Get the data of the failed record
-												String initialId = itemResponse.getId();
-												//Remove the language from the id in order to get just the inode/identifier
-												int languageIndex = initialId.lastIndexOf("_");
-												String failedId = initialId;
-												if ( languageIndex != -1 ) {
-													failedId = initialId.substring(0, languageIndex);
-												}
-
-												//Search the failed record into the list of records to delete
-												Iterator<IndexJournal<String>> toDeleteIterator = recordsToDelete.iterator();
-												while ( toDeleteIterator.hasNext() ) {
-
-													IndexJournal<String> indexToDelete = toDeleteIterator.next();
-													if ( indexToDelete.getInodeToIndex().equals(failedId) || indexToDelete.getIdentToIndex().equals(failedId) ) {
-
-														//Add it to the list of records that failed and needs to be added back to the reindex queue
-														if ( !exist(failedRecords, indexToDelete) ) {
-															failedRecords.add(indexToDelete);
-														}
-
-														/*
-														Remove the record from the list of contents to remove from the index journal table
-														as it indexing process failed and we want a re-try with those records.
-														 */
-														toDeleteIterator.remove();
-													}
-												}
-											}
-										}
-
-										if ( !failedRecords.isEmpty() ) {
-
-											Logger.error(this, "Reindex thread will try to re-index [" + String.valueOf(failedRecords.size()) + "] failed records.");
-
-											try {
-												Thread.sleep(delayOnError);
-											} catch ( InterruptedException e ) {
-												Logger.error(this, e.getMessage(), e);
-											}
-										}
-									}
-
-									return failedRecords;
-								}
-
-								/**
-								 * Checks if a given record already exist on a given list
-								 *
-								 * @param toRestore
-								 * @param toCompare
-								 * @return
-								 */
-								private boolean exist ( List<IndexJournal<String>> toRestore, IndexJournal<String> toCompare ) {
-
-									boolean exist = false;
-									for ( IndexJournal<String> current : toRestore ) {
-
-										if ( current.getId() == toCompare.getId() ) {
-											exist = true;
-											break;
-										}
-									}
-
-									return exist;
-								}
-
-							});
-				        }
-				        else if(recordsToDelete.size()>0) {
-				            addRecordsToDelete(recordsToDelete);
-				        }
+						addRecordsToDelete(recordsToDelete);
 					}
 
 				} catch (Exception ex) {
@@ -541,6 +365,47 @@ public class ReindexThread extends Thread {
 				}
 			}
 		}
+	}
+
+	private void manageFailedAttempt(IndexJournal<String> idx)
+			throws DotDataException, LanguageException {
+		//Counts the failed attempts when indexing and handles error notifications
+		addIndexingFailedAttempt();
+
+		try {
+            /*
+            Reset to null the server id of the failed records in the reindex journal table
+            in order to make them available again for the reindex process.
+             */
+            List<IndexJournal<String>> failedRecords = new ArrayList<>();
+            failedRecords.add(idx);
+            jAPI.resetServerForReindexEntry(failedRecords);
+        } catch ( DotDataException dataException ) {
+            Logger.error(this, "Error adding back failed records to reindex queue", dataException);
+        }
+		// The total number of re-tries minus 1 will
+		// indicate the last opportunity of a record to
+		// be re-indexed.
+		int totalAttempts = (DistributedJournalFactory.REINDEX_JOURNAL_PRIORITY_FAILED_FIRST_ATTEMPT + DistributedJournalFactory.RETRY_FAILED_INDEX_TIMES);
+		String identToIndex = idx.getIdentToIndex();
+		if (!this.notifiedFailingRecords.contains(identToIndex) && idx.getPriority() >= totalAttempts) {
+            // The record was not able to be re-indexed,
+            // so a notification will be generated and
+            // the record will not be processed anymore
+            String msg = "Could not re-index record with the Identifier '"
+                    + identToIndex
+                    + "'. The record is in a bad state or can be associated to orphaned records. You can try running the Fix Assets Inconsistencies tool and re-start the reindex.";
+
+//Generate and send an user notification
+            sendNotification("notification.reindexing.error.processrecord", new Object[] {identToIndex}, msg, true);
+            this.notifiedFailingRecords.add(identToIndex);
+        }
+
+		try {
+            Thread.sleep(delayOnError);
+        } catch ( InterruptedException ie ) {
+            Logger.error(this, ie.getMessage(), ie);
+        }
 	}
 
 	public void unlockCluster() throws DotDataException {
@@ -606,6 +471,9 @@ public class ReindexThread extends Thread {
 		//Creates and starts a thread
 		createThread();
 
+		instance.processor = instance.createProcessor();
+		instance.duplicated = new HashSet<>();
+
 		instance.startProcessing(sleep, delay);
 	}
 
@@ -614,6 +482,11 @@ public class ReindexThread extends Thread {
 	 */
 	public synchronized static void stopThread() {
 		if (instance != null && instance.isAlive()) {
+			try {
+				instance.processor.awaitClose(10L, TimeUnit.SECONDS);
+			} catch (InterruptedException e) {
+
+			}
 			Logger.info(ReindexThread.class,
 					"ContentIndexationThread ordered to stop processing");
 			instance.finish();
@@ -632,15 +505,8 @@ public class ReindexThread extends Thread {
 			instance.sleep = Config.getIntProperty("reindex.thread.sleep", 100);
 			instance.delay = Config.getIntProperty("reindex.thread.delay", 7500);
 			instance.delayOnError = Config.getIntProperty("reindex.thread.delayonerror", 500);
-			instance.reindexSleepDuringIndex = Config.getBooleanProperty("reindex.thread.reindexsleepduringindex", false);
 			instance.start();
-			int i = Config.getIntProperty("REINDEX_SLEEP_DURING_INDEX", 0);
-			if(i>0){
-				instance.setReindexSleepDuringIndex(true);
-				instance.setReindexSleepDuringIndexTime(i);
-			}
 		}
-
 	}
 	
     /**
@@ -709,7 +575,7 @@ public class ReindexThread extends Thread {
 				.convertFatContentletToContentlet(fattyContentlet);
 	}
 
-	private void writeDocumentToIndex(BulkRequestBuilder bulk, IndexJournal<String> idx) throws DotDataException, DotSecurityException {
+	private void writeDocumentToIndex(IndexJournal<String> idx) throws DotDataException, DotSecurityException {
 
 	    Logger.debug(this, "Indexing document "+idx.getIdentToIndex());
 	    System.setProperty("IN_FULL_REINDEX", "true");
@@ -739,9 +605,101 @@ public class ReindexThread extends Thread {
 				// its dependencies are reindexed in order to update its relationships fields
 				indexAPI.removeContentFromIndex(contentlet);
 			} else {
-				indexAPI.addContentToIndex(contentlet, false, true, indexAPI.isInFullReindex(), bulk);
+				addContentToIndex(contentlet);
 			}
         }
+	}
+
+	private  BulkProcessor createProcessor()  {
+		ESClient esClient = new ESClient();
+		return BulkProcessor.builder(esClient.getClient(),
+				new BulkProcessor.Listener() {
+					@Override
+					public void beforeBulk(long executionId, BulkRequest request) {
+
+					}
+
+					@Override
+					public void afterBulk(long executionId, BulkRequest request,
+							BulkResponse response) {
+
+						//TODO: Handle failures and retry
+						if (response.hasFailures()){
+							Logger.error(ReindexThread.class, "Indexing process failed " + response.buildFailureMessage());
+						}
+					}
+
+					@Override
+					public void afterBulk(long executionId, BulkRequest request,
+							Throwable failure) {
+
+						Logger.error(ReindexThread.class, "Indexing process failed", failure);
+
+					}
+				})
+				.setBulkActions(Config.getIntProperty("REINDEX_RECORDS_TO_FETCH", 200))
+				.build();
+	}
+
+
+
+	@WrapInTransaction
+	private void addContentToIndex(Contentlet con) {
+
+		ESMappingAPIImpl mappingAPI = new ESMappingAPIImpl();
+		String id=con.getIdentifier()+"_"+con.getLanguageId();
+
+		Gson gson=new Gson();
+		String mapping=null;
+
+		//Verify if it is enabled the option to regenerate missing metadata files on reindex
+		boolean regenerateMissingMetadata = Config
+				.getBooleanProperty("regenerate.missing.metadata.on.reindex", true);
+		/*
+		Verify if it is enabled the option to always regenerate metadata files on reindex,
+		enabling this could affect greatly the performance of a reindex process.
+		*/
+		boolean alwaysRegenerateMetadata = Config
+				.getBooleanProperty("always.regenerate.metadata.on.reindex", false);
+
+		try {
+
+			IndiciesInfo info=APILocator.getIndiciesAPI().loadIndicies();
+			if (con.isLive() || con.isWorking()) {
+				if (alwaysRegenerateMetadata) {
+					new TikaUtils().generateMetaData(con, true);
+				} else if (regenerateMissingMetadata) {
+					new TikaUtils().generateMetaData(con);
+				}
+			}
+
+			if (con.isWorking()) {
+				mapping=gson.toJson(mappingAPI.toMap(con));
+
+				if(!indexAPI.isInFullReindex())
+					processor.add(new IndexRequest(info.working, "content", id)
+							.source(mapping, XContentType.JSON));
+				if(info.reindex_working!=null)
+					processor.add(new IndexRequest(info.reindex_working, "content", id)
+							.source(mapping, XContentType.JSON));
+			}
+
+			if(con.isLive()) {
+				if(mapping==null)
+					mapping=gson.toJson(mappingAPI.toMap(con));
+
+				if(!indexAPI.isInFullReindex())
+					processor.add(new IndexRequest(info.live, "content", id)
+							.source(mapping, XContentType.JSON));
+				if(info.reindex_live!=null)
+					processor.add(new IndexRequest(info.reindex_live, "content", id)
+							.source(mapping, XContentType.JSON));
+			}
+		}
+		catch(DotSecurityException | DotDataException | DotMappingException ex) {
+			Logger.error(this, "Can't get a mapping for contentlet with id_lang:" + id + " Content data: " + con.getMap(), ex);
+
+		}
 	}
 	
 	int threadsPausing = 0;
@@ -803,34 +761,6 @@ public class ReindexThread extends Thread {
 	public void stopFullReindexationAndSwitchover() throws SQLException, DotDataException, InterruptedException {
 		this.remoteQ.clear();
 		reindexSwitchover(true);
-	}
-
-	/**
-	 * @return the reindexSleepDuringIndex
-	 */
-	public boolean isReindexSleepDuringIndex() {
-		return reindexSleepDuringIndex;
-	}
-
-	/**
-	 * @param reindexSleepDuringIndex the reindexSleepDuringIndex to set
-	 */
-	public void setReindexSleepDuringIndex(boolean reindexSleepDuringIndex) {
-		this.reindexSleepDuringIndex = reindexSleepDuringIndex;
-	}
-
-	/**
-	 * @return the reindexSleepDuringIndexTime
-	 */
-	public int getReindexSleepDuringIndexTime() {
-		return reindexSleepDuringIndexTime;
-	}
-
-	/**
-	 * @param reindexSleepDuringIndexTime the reindexSleepDuringIndexTime to set
-	 */
-	public void setReindexSleepDuringIndexTime(int reindexSleepDuringIndexTime) {
-		this.reindexSleepDuringIndexTime = reindexSleepDuringIndexTime;
 	}
 
 	/**
@@ -906,12 +836,8 @@ public class ReindexThread extends Thread {
 			if (ESReindexationProcessStatus.inFullReindexation(conn)) {
 				if (forceSwitch || jAPI.recordsLeftToIndexForServer(conn) == 0) {
 					Logger.info(this, "Running Reindex Switchover");
-					// Wait a bit while all records gets flushed to index
-					Thread.sleep(2000L);
 					indexAPI.fullReindexSwitchover(conn);
 					failedAttemptsCount = 0;
-					// Wait a bit while elasticsearch flushes it state
-					Thread.sleep(2000L);
 				}
 			}
 		} finally {
