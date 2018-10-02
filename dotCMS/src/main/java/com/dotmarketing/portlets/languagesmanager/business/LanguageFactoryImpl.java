@@ -221,26 +221,25 @@ public class LanguageFactoryImpl extends LanguageFactory {
             return list;
         } catch (DotDataException e) {
         	CacheLocator.getLanguageCache().putLanguages(null);
-            Logger.error(LanguageFactoryImpl.class, "getLanguages failed:" + e, e);
-            throw new DotRuntimeException(e.toString());
+            throw new DotRuntimeException(e);
         }
     }
 
 	
 	@Override
-    protected void saveLanguage(final Language o) {
+    protected void saveLanguage(final Language lang) {
         try {
-            if(UtilMethods.isSet(o.getLanguageCode())) {
-                o.setLanguageCode(o.getLanguageCode().toLowerCase());
+            if(UtilMethods.isSet(lang.getLanguageCode())) {
+                lang.setLanguageCode(lang.getLanguageCode().toLowerCase());
             }
-            if(UtilMethods.isSet(o.getCountryCode())) {
-                o.setCountryCode(o.getCountryCode().toUpperCase());
+            if(UtilMethods.isSet(lang.getCountryCode())) {
+                lang.setCountryCode(lang.getCountryCode().toUpperCase());
             }
-            dbUpsert(o);
+            dbUpsert(lang);
 			CacheLocator.getLanguageCache().clearLanguages();
 		} catch (DotDataException e) {
-            Logger.error(LanguageFactoryImpl.class, "saveLanguage failed to save the language.", e);
-            throw new DotRuntimeException("saveLanguage failed to save the language:" + o, e);
+
+            throw new DotRuntimeException("saveLanguage failed to save the language:" + lang, e);
 		}
     }
 
