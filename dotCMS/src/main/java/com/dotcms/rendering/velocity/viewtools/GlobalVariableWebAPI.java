@@ -19,33 +19,33 @@ public class GlobalVariableWebAPI implements ViewTool {
 
     }
     
-    private int getCurrentLanguageId () {
-        int language;
+    private long getCurrentLanguageId () {
+        long language;
         String languageSt = (String) request.getSession().getAttribute(com.dotmarketing.util.WebKeys.HTMLPAGE_LANGUAGE);
-        language = Integer.parseInt(languageSt);
+        language = Long.parseLong(languageSt);
         return language;
     }
     
     public String get(String property) {
-        int languageId = getCurrentLanguageId();
+        long languageId = getCurrentLanguageId();
         Language lang = langAPI.getLanguage(languageId);
         return langAPI.getStringKey(lang, property);
     }
 
     public int getInt(String property) {
-        int languageId = getCurrentLanguageId();
+        long languageId = getCurrentLanguageId();
         Language lang = langAPI.getLanguage(languageId);
         return langAPI.getIntKey(lang, property);
     }
 
     public boolean getBoolean(String property) {
-        int languageId = getCurrentLanguageId();
+        long languageId = getCurrentLanguageId();
         Language lang = langAPI.getLanguage(languageId);
         return langAPI.getBooleanKey(lang, property);
     }
 
     public float getFloat(String property) {
-        int languageId = getCurrentLanguageId();
+        long languageId = getCurrentLanguageId();
         Language lang = langAPI.getLanguage(languageId);
         return langAPI.getFloatKey(lang, property);
     }

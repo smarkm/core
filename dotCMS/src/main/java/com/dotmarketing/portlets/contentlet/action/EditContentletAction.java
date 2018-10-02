@@ -1074,7 +1074,7 @@ public class EditContentletAction extends DotPortletAction implements DotPortlet
 		String langId = req.getParameter("lang");
 		if(UtilMethods.isSet(langId)) {
 			try {
-				contentlet.setLanguageId(Integer.parseInt(langId));
+				contentlet.setLanguageId(Long.parseLong(langId));
 			} catch (NumberFormatException e) {
 				contentlet.setLanguageId(APILocator.getLanguageAPI().getDefaultLanguage().getId());
 			}

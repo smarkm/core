@@ -100,9 +100,15 @@ public class LanguageWebAPIImpl implements LanguageWebAPI {
             try{
                 futureLang = langAPI.getLanguage(Long.parseLong(tryId));
                 if(futureLang==null) throw new DotStateException("lang cannot be null");
+            } catch (NumberFormatException e){
+                futureLang = langAPI.getLanguage(tryId);
+                if(futureLang==null) {
+                    futureLang=currentLang;
+                }
             } catch (Exception e){
                 Logger.debug(this.getClass(), "invalid language passed in:" + tryId);
                 futureLang=currentLang;
+                
             }
         }
 

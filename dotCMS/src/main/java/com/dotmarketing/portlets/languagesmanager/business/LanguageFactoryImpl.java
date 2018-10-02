@@ -1,24 +1,7 @@
 package com.dotmarketing.portlets.languagesmanager.business;
 
-import static com.dotcms.util.CloseUtils.closeQuietly;
 import static com.dotcms.util.ConversionUtils.toLong;
 
-import com.dotmarketing.business.CacheLocator;
-import com.dotmarketing.business.DotCacheException;
-import com.dotmarketing.common.db.DotConnect;
-import com.dotmarketing.db.DbConnectionFactory;
-import com.dotmarketing.db.HibernateUtil;
-import com.dotmarketing.exception.DotDataException;
-import com.dotmarketing.exception.DotHibernateException;
-import com.dotmarketing.exception.DotRuntimeException;
-import com.dotmarketing.portlets.languagesmanager.model.Language;
-import com.dotmarketing.portlets.languagesmanager.model.LanguageKey;
-import com.dotmarketing.util.Config;
-import com.dotmarketing.util.Logger;
-import com.dotmarketing.util.UtilMethods;
-import com.google.common.annotations.VisibleForTesting;
-import com.liferay.portal.struts.MultiMessageResources;
-import com.liferay.util.FileUtil;
 import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.IOException;
@@ -31,9 +14,6 @@ import java.nio.channels.Channels;
 import java.nio.channels.ReadableByteChannel;
 import java.nio.channels.WritableByteChannel;
 import java.nio.file.Files;
-import java.sql.Connection;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.HashMap;
@@ -42,7 +22,26 @@ import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Collectors;
+
 import org.apache.struts.Globals;
+
+
+import com.dotcms.repackage.jersey.repackaged.com.google.common.collect.Lists;
+import com.dotmarketing.business.CacheLocator;
+import com.dotmarketing.business.DotCacheException;
+import com.dotmarketing.common.db.DotConnect;
+import com.dotmarketing.db.DbConnectionFactory;
+import com.dotmarketing.exception.DotDataException;
+import com.dotmarketing.exception.DotRuntimeException;
+import com.dotmarketing.portlets.languagesmanager.model.Language;
+import com.dotmarketing.portlets.languagesmanager.model.LanguageKey;
+import com.dotmarketing.util.Config;
+import com.dotmarketing.util.Logger;
+import com.dotmarketing.util.UtilMethods;
+import com.google.common.annotations.VisibleForTesting;
+import com.liferay.portal.struts.MultiMessageResources;
+import com.liferay.util.FileUtil;
 /**
  * Implementation class for the {@link LanguageFactory}.
  * 
@@ -54,7 +53,15 @@ import org.apache.struts.Globals;
  */
 public class LanguageFactoryImpl extends LanguageFactory {
 
-    public static final String DELETE_FROM_LANGUAGE_WHERE_ID = "delete from language where id = ?";
+    private static final String DELETE_FROM_LANGUAGE_WHERE_ID = "delete from language where id = ?";
+    
+    private static final String UPDATE_LANGUAGE_BY_ID="update language set language_code = ? ,country_code = ? ,language = ? ,country = ? where id=?";
+    private static final String INSERT_LANGUAGE_BY_ID="insert into language (id,language_code,country_code,language,country) values (?,?,?,?,?)";
+    private static final String SELECT_LANGUAGE_BY_LANG_AND_COUNTRY_CODES="select * from language where lower(language_code) = ? and lower(country_code) = ?";
+    private static final String SELECT_LANGUAGE_BY_LANG_CODE_ONLY="select * from language where lower(language_code) = ? and (country_code = '' OR country_code IS NULL)";
+    private static final String SELECT_LANGUAGE_BY_ID="select * from language where id = ?";
+    private static final String SELECT_ALL_LANGUAGES="select * from language where id <> ? order by language_code ";
+    
     private static Language defaultLanguage;
     private final DotConnect dotConnect;
     
@@ -78,58 +85,52 @@ public class LanguageFactoryImpl extends LanguageFactory {
 
 	@Override
     protected void deleteLanguage(Language language) {
-        try {
-			HibernateUtil.delete(language);
-		} catch (DotHibernateException e) {
-            Logger.error(LanguageFactoryImpl.class, "deleteLanguage failed to delete the language.", e);
-            throw new DotRuntimeException(e.toString(), e);
-		}
+     
+		deleteLanguageById(language);
+
         CacheLocator.getLanguageCache().removeLanguage(language);
     }
 
-	@Override
+
+    @Override
     protected Language getLanguage(String languageCode, String countryCode) {
 
         try {
-        	languageCode = languageCode.toLowerCase();
-        	countryCode = countryCode.toLowerCase();
-        	Language lang = CacheLocator.getLanguageCache().getLanguageByCode(languageCode, countryCode);
+            languageCode = (languageCode != null) ? languageCode.toLowerCase() : null;
+            countryCode = (countryCode != null) ? countryCode.toLowerCase() : null;
+            Language lang = CacheLocator.getLanguageCache().getLanguageByCode(languageCode, countryCode);
 
-        	if(lang == null) {
-	            HibernateUtil dh = new HibernateUtil(Language.class);
-	            if(UtilMethods.isSet(countryCode)) {
-					dh.setQuery(
-							"from language in class com.dotmarketing.portlets.languagesmanager.model.Language where lower(language_code) = ? and lower(country_code) = ?");
-					dh.setParam(languageCode);
-					dh.setParam(countryCode);
-				}else{
-					dh.setQuery(
-							"from language in class com.dotmarketing.portlets.languagesmanager.model.Language where lower(language_code) = ? and (country_code = '' OR country_code IS NULL)");
-					dh.setParam(languageCode);
-				}
-	            lang = (Language) dh.load();
+            if (lang == null) {
+                lang = UtilMethods.isSet(countryCode)
+                        ? fromDbList(new DotConnect()
+                                .setSQL(SELECT_LANGUAGE_BY_LANG_AND_COUNTRY_CODES)
+                                .addParam(languageCode)
+                                .addParam(countryCode)
+                                .loadObjectResults())
+                                .stream()
+                                .findFirst()
+                                .orElse(null)
+                        : getFallbackLanguage(languageCode);
 
-	            //Validate we are returning a valid Language object
-				if(lang != null && lang.getId() == 0){
-					lang = null;//Clean up as the dh.load() returned just an empty instance
-				}
+                if (lang != null && lang.getId() > 0) {
+                    CacheLocator.getLanguageCache().addLanguage(lang);
+                }
+            }
 
-	            if(lang != null){
-	            	CacheLocator.getLanguageCache().addLanguage(lang);
-	            }
-        	}
 
-        	return lang;
+
+            return lang;
 
         } catch (Exception e) {
-            Logger.error(LanguageFactoryImpl.class, "getLanguage failed:" + e, e);
-            throw new DotRuntimeException(e.toString());
+            Logger.error(LanguageFactoryImpl.class, "getLanguage (" + languageCode + "-" + countryCode + ") failed:" + e);
+            throw new DotRuntimeException(e);
         }
 
     }
 
 	@Override
     protected Language getLanguage(String id) {
+
 
 		// if we have a number
         if(id!=null && !id.contains("_") || !id.contains("-")  ){
@@ -153,43 +154,37 @@ public class LanguageFactoryImpl extends LanguageFactory {
 
     }
 
-	@Override
+    @Override
     protected Language createDefaultLanguage() {
 
-        Language language = getLanguage (Config.getStringProperty("DEFAULT_LANGUAGE_CODE"), Config.getStringProperty("DEFAULT_LANGUAGE_COUNTRY_CODE"));
-        language.setCountry(Config.getStringProperty("DEFAULT_LANGUAGE_COUNTRY"));
-        language.setCountryCode(Config.getStringProperty("DEFAULT_LANGUAGE_COUNTRY_CODE"));
-        language.setLanguage(Config.getStringProperty("DEFAULT_LANGUAGE_STR"));
-        language.setLanguageCode(Config.getStringProperty("DEFAULT_LANGUAGE_CODE"));
+        Language language = getLanguage (Config.getStringProperty("DEFAULT_LANGUAGE_CODE", "en"), Config.getStringProperty("DEFAULT_LANGUAGE_COUNTRY_CODE","US"));
+        language.setCountry(Config.getStringProperty("DEFAULT_LANGUAGE_COUNTRY", "United States"));
+        language.setCountryCode(Config.getStringProperty("DEFAULT_LANGUAGE_COUNTRY_CODE", "US"));
+        language.setLanguage(Config.getStringProperty("DEFAULT_LANGUAGE_STR", "English"));
+        language.setLanguageCode(Config.getStringProperty("DEFAULT_LANGUAGE_CODE", "en"));
 
         //saves the new language
-        try {
-			HibernateUtil.save(language);
-		} catch (DotHibernateException e) {
-            Logger.error(LanguageFactoryImpl.class, "getLanguage failed to save the language.", e);
-            throw new DotRuntimeException(e.toString(), e);
 
-		}
+		saveLanguage(language);
 
-        //adds it to the cache
-		CacheLocator.getLanguageCache().removeLanguage(language);
-		CacheLocator.getLanguageCache().addLanguage(language);
 
         return language;
 
     }
 
 	@Override
-    protected Language getLanguage(long id) {
+    protected Language getLanguage(final long id) {
 		Language lang = CacheLocator.getLanguageCache().getLanguageById(id);
 		if(lang != null){
 			return lang;
 		}
         try {
-            HibernateUtil dh = new HibernateUtil(Language.class);
-            dh.setQuery("from language in class com.dotmarketing.portlets.languagesmanager.model.Language where id = ? ");
-            dh.setParam(id);
-            lang = (Language) dh.load();
+            lang =  fromDbList(new DotConnect().setSQL( SELECT_LANGUAGE_BY_ID)
+                      .addParam(id)
+                      .loadObjectResults())
+                      .stream()
+                      .findFirst()  
+                      .orElse(null);
 
 			//Validate we are returning a valid Language object
 			if(lang != null && lang.getId() == 0){
@@ -200,15 +195,14 @@ public class LanguageFactoryImpl extends LanguageFactory {
             	CacheLocator.getLanguageCache().addLanguage(lang);
             }
             return lang;
-        } catch (DotHibernateException e) {
-            Logger.error(LanguageFactoryImpl.class, "getLanguage failed:" + e, e);
-            throw new DotRuntimeException(e.toString());
+        } catch (DotDataException e) {
+            Logger.error(LanguageFactoryImpl.class, "getLanguage failed - id:" + id + " message: " + e);
+            throw new DotRuntimeException(e);
         }
 
     }
 
 	@Override
-    @SuppressWarnings("unchecked")
 	protected List<Language> getLanguages() {
         List<Language> list = CacheLocator.getLanguageCache().getLanguages();
         if(list!=null){
@@ -217,28 +211,24 @@ public class LanguageFactoryImpl extends LanguageFactory {
         try {
         	Language defaultLang = getDefaultLanguage();
 
-            HibernateUtil dh = new HibernateUtil(Language.class);
-            dh.setQuery("from language in class com.dotmarketing.portlets.languagesmanager.model.Language order by id");
+        	list =  fromDbList(new DotConnect().setSQL( SELECT_ALL_LANGUAGES)
+                    .addParam(defaultLang.getId())
+                    .loadObjectResults());
 
-            list = dh.list();
-            List<Language> copy = new ArrayList<Language>(list);
-            for(Language l : copy) {
-			   	if(l.getId() == defaultLang.getId()) {
-			   		list.remove(l);
-					list.add(0, l);
-			   	}
-			}
+        	list.add(0,defaultLang);
+
             CacheLocator.getLanguageCache().putLanguages(list);
             return list;
-        } catch (DotHibernateException e) {
+        } catch (DotDataException e) {
         	CacheLocator.getLanguageCache().putLanguages(null);
             Logger.error(LanguageFactoryImpl.class, "getLanguages failed:" + e, e);
             throw new DotRuntimeException(e.toString());
         }
     }
 
+	
 	@Override
-    protected void saveLanguage(Language o) {
+    protected void saveLanguage(final Language o) {
         try {
             if(UtilMethods.isSet(o.getLanguageCode())) {
                 o.setLanguageCode(o.getLanguageCode().toLowerCase());
@@ -246,11 +236,11 @@ public class LanguageFactoryImpl extends LanguageFactory {
             if(UtilMethods.isSet(o.getCountryCode())) {
                 o.setCountryCode(o.getCountryCode().toUpperCase());
             }
-			HibernateUtil.saveOrUpdate(o);
+            dbUpsert(o);
 			CacheLocator.getLanguageCache().clearLanguages();
-		} catch (DotHibernateException e) {
+		} catch (DotDataException e) {
             Logger.error(LanguageFactoryImpl.class, "saveLanguage failed to save the language.", e);
-            throw new DotRuntimeException(e.toString(), e);
+            throw new DotRuntimeException("saveLanguage failed to save the language:" + o, e);
 		}
     }
 
@@ -268,31 +258,30 @@ public class LanguageFactoryImpl extends LanguageFactory {
 		if (id > 0) {
 			language = getLanguage(id);
 		} else {
-			language = getLanguage(Config.getStringProperty("DEFAULT_LANGUAGE_CODE"), Config.getStringProperty("DEFAULT_LANGUAGE_COUNTRY_CODE"));
+			language =getDefaultLanguage ();
 		}
 
 		return language.getLanguageCode() + "_" + language.getCountryCode();
 	}
 
-	@Override
-    protected Language getDefaultLanguage () {
+    @Override
+    protected Language getDefaultLanguage() {
 
         if (defaultLanguage == null) {
 
-        	synchronized (this) {
+            synchronized (this) {
 
-				if (defaultLanguage == null) {
+                if (defaultLanguage == null) {
 
-					defaultLanguage = getLanguage(
-							Config.getStringProperty("DEFAULT_LANGUAGE_CODE"),
-							Config.getStringProperty("DEFAULT_LANGUAGE_COUNTRY_CODE"));
+                    defaultLanguage = getLanguage(Config.getStringProperty("DEFAULT_LANGUAGE_CODE", "en"),
+                            Config.getStringProperty("DEFAULT_LANGUAGE_COUNTRY_CODE", "US"));
 
-					if (defaultLanguage.getId() == 0) {
+                    if (defaultLanguage==null || defaultLanguage.getId() == 0) {
 
-						defaultLanguage = createDefaultLanguage();
-					}
-				}
-			}
+                       defaultLanguage = createDefaultLanguage();
+                    }
+                }
+            }
         }
 
         return defaultLanguage;
@@ -434,7 +423,7 @@ public class LanguageFactoryImpl extends LanguageFactory {
 	}
 
 	@Override
-	protected void createLanguageFiles(Language lang) {
+	protected void createLanguageFiles(final Language lang) {
         String langCodeAndCountryCode = lang.getLanguageCode() + "_" + lang.getCountryCode();
         String langCode = lang.getLanguageCode();
 
@@ -600,43 +589,22 @@ public class LanguageFactoryImpl extends LanguageFactory {
     @Override
     protected Language getFallbackLanguage(final String languageCode) {
 
-        final Connection conn = DbConnectionFactory.getConnection();
-        PreparedStatement preparedStatement = null;
-        ResultSet resultSet = null;
         Language lang = null;
 
         try {
 
-            preparedStatement = conn.prepareStatement(
-                    "SELECT * FROM language WHERE language_code = ? AND (country_code = '' OR country_code IS NULL)");
-            lang              = CacheLocator.getLanguageCache().getLanguageByCode(languageCode.toLowerCase(), null);
+            return fromDbMap(new DotConnect()
+                    .setSQL(SELECT_LANGUAGE_BY_LANG_CODE_ONLY)
+                    .addParam(languageCode.toLowerCase())
+                    .loadObjectResults().stream().findFirst().orElse(null));
+                    
 
-            if (lang == null) {
-
-                preparedStatement.setString(1, languageCode.toLowerCase());
-                resultSet = preparedStatement.executeQuery();
-
-                if (resultSet.next()) {
-
-                    final long id          = toLong(resultSet.getObject(1), 0L);
-                    final String langCode    = resultSet.getString(2);
-                    final String countryCode = resultSet.getString(3);
-                    final String language    = resultSet.getString(4);
-                    final String country     = resultSet.getString(5);
-                    lang            = new Language(id, langCode, countryCode, language, country);
-                    CacheLocator.getLanguageCache().addLanguage(lang);
-                }
-            }
-        } catch (Exception e) {
+        } catch (DotDataException e) {
 
             Logger.error(LanguageFactoryImpl.class, "getLanguage failed:" + e, e);
             throw new DotRuntimeException(e.toString());
-        } finally {
-
-			closeQuietly(preparedStatement, resultSet);
         }
 
-        return lang;
     } // getFallbackLanguage.
 
     @Override
@@ -651,7 +619,7 @@ public class LanguageFactoryImpl extends LanguageFactory {
             Logger.debug(this, "Deleting the language by id: " + id);
 			rowsAffected = this.dotConnect.executeUpdate(DELETE_FROM_LANGUAGE_WHERE_ID, id);
         } catch (DotDataException e) {
-            Logger.error(LanguageFactoryImpl.class, "deleteLanguageById failed to delete the language with id: " + id, e);
+            Logger.warn(LanguageFactoryImpl.class, "deleteLanguageById failed to delete the language with id: " + id);
             throw new DotRuntimeException(e.toString(), e);
         } finally {
 
@@ -661,4 +629,62 @@ public class LanguageFactoryImpl extends LanguageFactory {
 		return rowsAffected;
     } // deleteLanguageById.
 
+
+    private void dbUpsert(final Language language) throws DotDataException{
+
+        if(language.getId()==0) {
+            language.setId(System.currentTimeMillis());
+        }
+        Language tester = getLanguage(language.getId());
+        if(tester !=null) {
+
+            new DotConnect().setSQL(UPDATE_LANGUAGE_BY_ID)
+            .addParam(language.getLanguageCode().toLowerCase())
+            .addParam(language.getCountryCode())
+            .addParam(language.getLanguage())
+            .addParam(language.getCountry())
+            .addParam(language.getId())
+            .loadResult();
+        }
+        else {
+            if(DbConnectionFactory.isMsSql()) {
+                new DotConnect().setSQL(" SET IDENTITY_INSERT language ON").loadResult();
+            }
+            DotConnect dc = new DotConnect().setSQL(INSERT_LANGUAGE_BY_ID)
+            .addParam(language.getId())
+            .addParam(language.getLanguageCode().toLowerCase())
+            .addParam(language.getCountryCode())
+            .addParam(language.getLanguage())
+            .addParam(language.getCountry());
+            dc.loadResult();
+        }
+        CacheLocator.getLanguageCache().removeLanguage(language);
+        
+        
+        
+    }
+    
+    private List<Language> fromDbList(final List<Map<String, Object>> resultSet){
+        if(resultSet==null) return Lists.newArrayList();
+        return resultSet.stream().map(map -> fromDbMap(map)).collect(Collectors.toList());
+
+    }
+    
+    
+    private Language fromDbMap(final Map<String, Object> resultSet){
+        if(resultSet==null) {
+            return null;
+        }
+        final long id               = toLong(resultSet.get("id"), 0L);
+        final String langCode       = (resultSet.get("language_code")!=null)    ? String.valueOf(resultSet.get("language_code")): null;
+        final String countryCode    = (resultSet.get("country_code")!=null)     ? String.valueOf(resultSet.get("country_code")) : null;
+        final String language       = (resultSet.get("language")!=null)         ? String.valueOf(resultSet.get("language"))     : null;
+        final String country        = (resultSet.get("country")!=null)          ? String.valueOf(resultSet.get("country"))      : null;
+        return new Language(id, langCode, countryCode, language, country);
+    }
+    
+    
+    
+    
+    
 }

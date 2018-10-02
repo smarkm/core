@@ -4,6 +4,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import com.dotmarketing.common.db.DotConnect;
 import com.dotmarketing.exception.DotDataException;
 import com.dotmarketing.portlets.languagesmanager.model.Language;
 import com.dotmarketing.portlets.languagesmanager.model.LanguageKey;
@@ -151,4 +152,8 @@ public abstract class LanguageFactory {
      * @param id long
      */
     protected  abstract int deleteLanguageById(final Language fallbackLanguage) ;
+
+
+
+
 }

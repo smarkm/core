@@ -10,6 +10,7 @@ import com.dotmarketing.business.APILocator;
 import com.dotmarketing.business.CacheLocator;
 import com.dotmarketing.business.FactoryLocator;
 import com.dotmarketing.exception.DotDataException;
+import com.dotmarketing.exception.DotRuntimeException;
 import com.dotmarketing.exception.DotSecurityException;
 import com.dotmarketing.portlets.contentlet.model.Contentlet;
 import com.dotmarketing.portlets.languagesmanager.model.DisplayedLanguage;
@@ -138,10 +139,14 @@ public class LanguageAPIImpl implements LanguageAPI {
 	@Override
 	public void saveLanguage(final Language language) {
 
-        factory.saveLanguage(language);
-        Logger.debug(this, "Created language: " + language);
-	}
 
+	    factory.saveLanguage(language);
+
+        Logger.debug(this, "Saved language: " + language);
+	}
+	
+
+    
     @CloseDBIfOpened
 	@Override
 	public String getLanguageCodeAndCountry(final long id, final String langId) {
