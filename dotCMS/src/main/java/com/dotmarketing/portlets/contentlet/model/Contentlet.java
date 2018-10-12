@@ -33,6 +33,7 @@ import com.dotmarketing.tag.model.TagInode;
 import com.dotmarketing.util.InodeUtils;
 import com.dotmarketing.util.Logger;
 import com.dotmarketing.util.UtilMethods;
+import com.google.common.collect.ImmutableSet;
 import com.liferay.portal.model.User;
 import java.io.File;
 import java.io.IOException;
@@ -45,6 +46,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import org.apache.commons.lang.builder.ToStringBuilder;
 
@@ -81,13 +83,17 @@ public class Contentlet implements Serializable, Permissionable, Categorizable, 
     public static final String SORT_ORDER_KEY = "sortOrder";
     public static final String HOST_KEY = "host";
     public static final String FOLDER_KEY = "folder";
-    public static final String WORKFLOW_ACTION_KEY = "wfActionId";
-    public static final String WORKFLOW_ASSIGN_KEY = "wfActionAssign";
-    public static final String WORKFLOW_COMMENTS_KEY = "wfActionComments";
+	public static final String NULL_PROPERTIES = "nullProperties";
+	public static final String WORKFLOW_ACTION_KEY = "wfActionId";
+	public static final String WORKFLOW_ASSIGN_KEY = "wfActionAssign";
+	public static final String WORKFLOW_COMMENTS_KEY = "wfActionComments";
 	public static final String WORKFLOW_BULK_KEY = "wfActionBulk";
 
     public static final String DONT_VALIDATE_ME = "_dont_validate_me";
     public static final String DISABLE_WORKFLOW = "__disable_workflow__";
+
+    // means the contentlet is being used on unit test mode.
+	public static final String IS_TEST_MODE = "_is_test_mode";
 
 	/**
 	 * Flag to avoid to trigger the workflow again on the checkin when it is already in progress.
@@ -103,11 +109,67 @@ public class Contentlet implements Serializable, Permissionable, Categorizable, 
 
 	private transient ContentType contentType;
     protected Map<String, Object> map = new ContentletHashMap();
-    private boolean lowIndexPriority = false;
+
+	private boolean lowIndexPriority = false;
 
     private transient ContentletAPI contentletAPI;
     private transient UserAPI userAPI;
+	private transient IndexPolicy indexPolicy = IndexPolicy.DEFER;
+	private transient IndexPolicy indexPolicyDependencies = IndexPolicy.DEFER;
 
+	public IndexPolicy getIndexPolicy() {
+
+		return (null == this.indexPolicy)?
+				IndexPolicy.DEFER:indexPolicy;
+	}
+
+	/**
+	 * This method sets IndexPolicy, it could be:
+	 *
+	 * <ul>
+	 * <li>DEFER, you do not care about when is gonna be reindex your content, usually usefull on batch processing.</li>
+	 * <li>WAIT_FOR, you want to wait until the content is ready to be searchable.</li>
+	 * <li>FORCE, you want to force the content searchable immediate, however this policy is not highly scalable.</li>
+	 * </ul>
+	 * @param indexPolicy
+	 */
+	public void setIndexPolicy(final IndexPolicy indexPolicy) {
+
+		if (null != indexPolicy) {
+			this.indexPolicy = indexPolicy;
+		}
+	}
+
+	public IndexPolicy getIndexPolicyDependencies() {
+
+		return (null == this.indexPolicyDependencies)?
+				IndexPolicy.DEFER:indexPolicyDependencies;
+	}
+
+	/**
+	 * This method sets IndexPolicy for the dependencies (relationships and categories), it could be:
+	 *
+	 * <ul>
+	 * <li>DEFER, you do not care about when is gonna be reindex your content, usually usefull on batch processing.</li>
+	 * <li>WAIT_FOR, you want to wait until the content is ready to be searchable.</li>
+	 * <li>FORCE, you want to force the content searchable immediate, however this policy is not highly scalable.</li>
+	 * </ul>
+	 * @param indexPolicy
+	 */
+	public void setIndexPolicyDependencies(final IndexPolicy indexPolicy) {
+
+		if (null != indexPolicy) {
+			this.indexPolicyDependencies = indexPolicy;
+		}
+	}
+
+
+
+
+
+	public void setContentType(ContentType contentType) {
+		this.contentType = contentType;
+	}
 
 	@Override
     public String getCategoryId() {
@@ -115,12 +177,25 @@ public class Contentlet implements Serializable, Permissionable, Categorizable, 
     }
 
     /**
-     * 
+     * Create a contentlet based on a map (makes a copy of it)
      * @param map
      */
-    public Contentlet(Map<String, Object> map) {
-    	this.map = map;
+    public Contentlet(final Map<String, Object> map) {
+		this.map = new ContentletHashMap();
+    	this.map.putAll(map);
+		this.indexPolicy = IndexPolicy.DEFER;
     }
+
+	/**
+	 * Create a contentlet based on a map (makes a copy of it)
+	 * @param map
+	 */
+	public Contentlet(final Contentlet contentlet) {
+		this(contentlet.getMap());
+		if (null != contentlet.getIndexPolicy()) {
+			this.indexPolicy = contentlet.getIndexPolicy();
+		}
+	}
 
     /**
      * Default class constructor.
@@ -131,8 +206,10 @@ public class Contentlet implements Serializable, Permissionable, Categorizable, 
 		setLanguageId(0);
 		setContentTypeId("");
 		setSortOrder(0);
-		setDisabledWysiwyg(new ArrayList<String>());
-    }
+		setDisabledWysiwyg(new ArrayList<>());
+		this.indexPolicy = IndexPolicy.DEFER;
+		getWritableNullProperties();
+	}
 
     @Override
     public String getName() {
@@ -521,6 +598,13 @@ public class Contentlet implements Serializable, Permissionable, Categorizable, 
 	 */
 	public void setProperty( String fieldVarName, Object objValue) throws DotRuntimeException {
 		map.put(fieldVarName, objValue);
+		if (!NULL_PROPERTIES.equals(fieldVarName)) { // No need to keep track of the null property it self.
+			if (null == objValue) {
+				addNullProperty(fieldVarName);
+			} else {
+				removeNullProperty(fieldVarName);
+			}
+		}
 	}
 
 	/**
@@ -1068,6 +1152,58 @@ public class Contentlet implements Serializable, Permissionable, Categorizable, 
 			}
 		}
 	}
+
+	/**
+	 * This method is used to keep track of the null values added to the internal map
+	 * @param property
+	 */
+	@SuppressWarnings("unchecked")
+	private void addNullProperty(final String property){
+		getWritableNullProperties().add(property);
+	}
+
+	/**
+	 * .
+	 * @param property
+	 */
+	@SuppressWarnings("unchecked")
+	private void removeNullProperty(final String property){
+		getWritableNullProperties().remove(property);
+	}
+
+	/**
+	 * Convenience method to get access to the null values set that is kept within the map
+	 * @return
+	 */
+	@SuppressWarnings("unchecked")
+	private Set<String> getWritableNullProperties(){
+		return (Set<String>)map.computeIfAbsent(NULL_PROPERTIES, s -> {
+			return ConcurrentHashMap.newKeySet();
+		});
+	}
+
+	/**
+	 * This method returns an immutable copy of the null properties set to the properties map
+	 * @return
+	 */
+	@com.dotcms.repackage.com.fasterxml.jackson.annotation.JsonIgnore
+	@com.fasterxml.jackson.annotation.JsonIgnore
+	@SuppressWarnings("unchecked")
+	public Set<String> getNullProperties(){
+		final Set<String> set = (Set<String>)this.map.get(NULL_PROPERTIES);
+		if(null == set){
+		   return ImmutableSet.of();
+		}
+		return ImmutableSet.copyOf(set);
+	}
+
+	/**
+	 * Since the Contentlet is kept in cache it makes sense removing certain values from the map
+	 */
+	public void cleanup(){
+		getWritableNullProperties().clear();
+	}
+
 
 	private class ContentletHashMap extends ConcurrentHashMap<String, Object> {
 		 /**

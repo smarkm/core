@@ -71,6 +71,14 @@ public interface ContentletAPI {
 	 * @throws DotSecurityException 
 	 */
 	public Contentlet findContentletForLanguage(long languageId, Identifier contentletId) throws DotDataException, DotSecurityException;
+
+
+	/**
+	 * Returns all working Contentlet instances if available for all languages.
+ 	 * @param identifier
+	 * @return
+	 */
+	public List<Contentlet> findAllLangContentlets(final String identifier);
 	
 	/**
 	 * Returns all Contentlets for a specific structure
@@ -1414,22 +1422,30 @@ public interface ContentletAPI {
 	
 	/**
 	 * Method will time out after 30 seconds returning false
+	 * @deprecated Use the Contentlet.setWaitForIndex instead
 	 * @param inode
 	 * @return
 	 */
+	@Deprecated
 	public boolean isInodeIndexed(String inode);
 	
 	/**
 	 *  this version optionally adds a +live:true to the search
 	 *  if parameter live is true.
+	 *  @deprecated Use the Contentlet.setWaitForIndex instead
 	 * @param inode
 	 * @param live
 	 * @return
 	 */
+	@Deprecated
 	public boolean isInodeIndexed(String inode, boolean live);
 
 	/**
 	 * This version optionally adds a +live:true to the search if parameter live is true.
+	 * @param inode inode to check if it is indexed
+	 * @param live boolean true if wants to check the live version
+	 * @param secondsToWait int how long to wait before timing out (it milliseconds, so for instance 3 seconds will be 3000)
+	 * @return boolean true if it is indexed in the time interval
 	 */
 	public boolean isInodeIndexed(String inode, boolean live, int secondsToWait);
 
@@ -1438,14 +1454,16 @@ public interface ContentletAPI {
 	 * <p><strong>Example of the resulting query when using this method:</strong>
 	 * +inode:﻿38a3f133-85e1-4b07-b55e-179f38303b90 +live:false +working:true </p> <p>This method
 	 * will time out after 30 seconds returning false</p>
+	 * @deprecated Use the Contentlet.setWaitForIndex instead
 	 */
+	@Deprecated
 	public boolean isInodeIndexed(String inode, boolean live, boolean working);
 
 	/**
 	 * Method will time out after 30 seconds returning false
 	 * @param inode
-	 * @param secondsToWait - how long to wait before timing out
-	 * @return
+	 * @param secondsToWait - how long to wait before timing out (it milliseconds, so for instance 3 seconds will be 3000)
+	 * @return boolean true if it is indexed in the time interval
 	 */
 	public boolean isInodeIndexed(String inode, int secondsToWait);
 

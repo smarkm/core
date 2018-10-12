@@ -12,13 +12,18 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
+import com.dotcms.api.system.event.ContentletSystemEventUtil;
+import com.dotcms.concurrent.DotConcurrentFactory;
+import com.dotcms.concurrent.DotSubmitter;
 import com.dotcms.content.business.DotMappingException;
+import com.dotcms.contenttype.business.ContentTypeAPI;
 import com.dotcms.contenttype.business.ContentTypeAPIImpl;
 import com.dotcms.contenttype.model.field.DataTypes;
 import com.dotcms.contenttype.model.field.DateTimeField;
 import com.dotcms.contenttype.model.field.FieldBuilder;
 import com.dotcms.contenttype.model.field.ImmutableBinaryField;
 import com.dotcms.contenttype.model.field.ImmutableTextField;
+import com.dotcms.contenttype.model.field.TextField;
 import com.dotcms.contenttype.model.type.BaseContentType;
 import com.dotcms.contenttype.model.type.ContentType;
 import com.dotcms.contenttype.model.type.ContentTypeBuilder;
@@ -36,6 +41,7 @@ import com.dotcms.rendering.velocity.services.VelocityResourceKey;
 import com.dotcms.rendering.velocity.services.VelocityType;
 import com.dotcms.rendering.velocity.util.VelocityUtil;
 import com.dotcms.repackage.org.apache.commons.io.FileUtils;
+import com.dotcms.util.CollectionsUtils;
 import com.dotmarketing.beans.Host;
 import com.dotmarketing.beans.Identifier;
 import com.dotmarketing.beans.MultiTree;
@@ -49,6 +55,7 @@ import com.dotmarketing.business.PermissionAPI;
 import com.dotmarketing.business.RelationshipAPI;
 import com.dotmarketing.common.model.ContentletSearch;
 import com.dotmarketing.db.HibernateUtil;
+import com.dotmarketing.db.LocalTransaction;
 import com.dotmarketing.exception.DotDataException;
 import com.dotmarketing.exception.DotSecurityException;
 import com.dotmarketing.factories.MultiTreeFactory;
@@ -59,6 +66,7 @@ import com.dotmarketing.portlets.categories.business.CategoryAPI;
 import com.dotmarketing.portlets.categories.model.Category;
 import com.dotmarketing.portlets.containers.model.Container;
 import com.dotmarketing.portlets.contentlet.model.Contentlet;
+import com.dotmarketing.portlets.contentlet.model.IndexPolicy;
 import com.dotmarketing.portlets.fileassets.business.FileAssetAPI;
 import com.dotmarketing.portlets.folders.business.FolderAPI;
 import com.dotmarketing.portlets.folders.model.Folder;
@@ -79,6 +87,7 @@ import com.dotmarketing.portlets.templates.model.Template;
 import com.dotmarketing.tag.model.Tag;
 import com.dotmarketing.util.Config;
 import com.dotmarketing.util.DateUtil;
+import com.dotmarketing.util.InodeUtils;
 import com.dotmarketing.util.Logger;
 import com.dotmarketing.util.PageMode;
 import com.dotmarketing.util.UUIDGenerator;
@@ -102,13 +111,17 @@ import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Future;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import javax.servlet.http.HttpServletRequest;
@@ -155,6 +168,126 @@ public class ContentletAPITest extends ContentletBaseTest {
         //Validations
         assertTrue( contentlet != null && ( contentlet.getInode() != null && !contentlet.getInode().isEmpty() ) );
     }
+
+    @Ignore ( "Not Ready to Run." )
+    @Test
+    public void run_listener_after_save_result_called_all_listeners () throws DotDataException, DotSecurityException {
+
+        ContentType typeResult = null;
+        final int        numberOfContents    = 1000;//20000;
+        final CountDownLatch countDownLatch  = new CountDownLatch(numberOfContents);
+        DotSubmitter dotSubmitter = DotConcurrentFactory.getInstance().getSubmitter(DotConcurrentFactory.DOT_SYSTEM_THREAD_POOL);
+        try {
+
+            final long       languageId          = APILocator.getLanguageAPI().getDefaultLanguage().getId();
+            final String velocityContentTypeName = "RunListenerAfterSaveTest8";
+
+
+            LocalTransaction.wrap(() -> {
+
+                final ContentType type = contentTypeAPI.save(
+                        ContentTypeBuilder.builder(BaseContentType.CONTENT.immutableClass())
+                                .expireDateVar(null).folder(FolderAPI.SYSTEM_FOLDER).host(Host.SYSTEM_HOST)
+                                .name("RunListenerAfterSaveTest").owner(APILocator.systemUser().toString())
+                                .variable(velocityContentTypeName).build());
+
+                final List<com.dotcms.contenttype.model.field.Field> fields = new ArrayList<>(type.fields());
+
+                fields.add(FieldBuilder.builder(TextField.class).name("title").variable("title")
+                        .contentTypeId(type.id()).dataType(DataTypes.TEXT).indexed(true).build());
+                fields.add(FieldBuilder.builder(TextField.class).name("txt").variable("txt")
+                        .contentTypeId(type.id()).dataType(DataTypes.TEXT).indexed(true).build());
+
+                contentTypeAPI.save(type, fields);
+            });
+
+            final ContentType type = contentTypeAPI.find(velocityContentTypeName);
+            final List<Future> futures = new ArrayList<>();
+
+            for (int i = 0; i < numberOfContents; ++i) {
+
+                futures.add(dotSubmitter.submit(() -> {
+
+                    try {
+                        List<Contentlet> contentlets =
+                                APILocator.getContentletAPI().search("+type:" + velocityContentTypeName, 1000, 0, null, APILocator.systemUser(), false);
+                        if (UtilMethods.isSet(contentlets)) {
+
+                            for (final Contentlet contentlet1 : contentlets) {
+                                APILocator.getContentletAPI().find(contentlet1.getInode(), APILocator.systemUser(), false);
+                            }
+                        }
+                    } catch (DotDataException  | DotSecurityException e) {
+                        e.printStackTrace();
+                    }
+                }));
+
+                LocalTransaction.wrapReturnWithListeners(() -> {
+
+
+                    final Contentlet contentlet = new Contentlet();
+                    final User user = APILocator.systemUser();
+                    contentlet.setContentTypeId(type.id());
+                    contentlet.setOwner(APILocator.systemUser().toString());
+                    contentlet.setModDate(new Date());
+                    contentlet.setLanguageId(languageId);
+                    contentlet.setStringProperty("title", "Test Save");
+                    contentlet.setStringProperty("txt", "Test Save Text");
+                    contentlet.setHost(Host.SYSTEM_HOST);
+                    contentlet.setFolder(FolderAPI.SYSTEM_FOLDER);
+                    contentlet.setIndexPolicy(IndexPolicy.WAIT_FOR);
+
+                    // first save
+                    final Contentlet contentlet1 = contentletAPI.checkin(contentlet, user, false);
+                    if (null != contentlet1) {
+                        HibernateUtil.addCommitListener(() -> {
+
+                            try {
+                                assertTrue(APILocator.getContentletAPI().indexCount("+inode:" + contentlet1.getInode(), user, false) > 0);
+                            } catch (DotDataException | DotSecurityException e) {
+                                fail(e.getMessage());
+                            }
+
+                            if (APILocator.getContentletAPI().isInodeIndexed(contentlet1.getInode())) {
+                                ContentletSystemEventUtil.getInstance().pushSaveEvent(contentlet1, true);
+                            }
+
+                            countDownLatch.countDown();
+                        }, 1000);
+                    }
+
+                    return null;
+                });
+            }
+
+            for (final Future future: futures) {
+
+                future.get();
+                countDownLatch.await(1, TimeUnit.SECONDS);
+            }
+
+            if (countDownLatch.getCount() > 0) {
+
+                countDownLatch.await(30, TimeUnit.SECONDS);
+            }
+
+            assertEquals(0 , countDownLatch.getCount());
+
+            typeResult = type;
+        } catch (Exception e) {
+
+            fail(e.getMessage());
+        } finally {
+
+            if (null != typeResult) {
+
+                ContentTypeAPI contentTypeAPI = APILocator.getContentTypeAPI(APILocator.systemUser());
+                contentTypeAPI.delete(typeResult);
+            }
+        }
+
+    }
+
 
     /**
      * Testing {@link ContentletAPI#find(String, com.liferay.portal.model.User, boolean)}
@@ -530,16 +663,16 @@ public class ContentletAPITest extends ContentletBaseTest {
         host1.setHostname("copy.contentlet.t1_"+System.currentTimeMillis());
         host1.setDefault(false);
         host1.setLanguageId(defLang);
+        host1.setIndexPolicy(IndexPolicy.FORCE);
         host1 = APILocator.getHostAPI().save(host1, user, false);
-        contentletAPI.isInodeIndexed(host1.getInode());
-        
+
         Host host2=new Host();
         host2.setHostname("copy.contentlet.t2_"+System.currentTimeMillis());
         host2.setDefault(false);
         host2.setLanguageId(defLang);
+        host2.setIndexPolicy(IndexPolicy.FORCE);
         host2 = APILocator.getHostAPI().save(host2, user, false);
-        contentletAPI.isInodeIndexed(host2.getInode());
-        
+
         
         java.io.File bin=new java.io.File(APILocator.getFileAssetAPI().getRealAssetPathTmpBinary() + separator
                 + UUIDGenerator.generateUuid() + separator + "hello.txt");
@@ -556,8 +689,8 @@ public class ContentletAPITest extends ContentletBaseTest {
         file.setStringProperty(FileAssetAPI.TITLE_FIELD,"test copy");
         file.setStringProperty(FileAssetAPI.FILE_NAME_FIELD, "hello.txt");
         file.setBinary(FileAssetAPI.BINARY_FIELD, bin);
+        file.setIndexPolicy(IndexPolicy.FORCE);
         file = contentletAPI.checkin(file, user, false);
-        contentletAPI.isInodeIndexed(file.getInode());
         final String ident = file.getIdentifier();
         
         // create 20 versions
@@ -1226,9 +1359,9 @@ public class ContentletAPITest extends ContentletBaseTest {
             if(identifier!=null) con.setIdentifier(identifier);
             con.setStringProperty(ff.getVelocityVarName(), "test text "+System.currentTimeMillis());
             con.setLanguageId(ll.getId());
+            con.setIndexPolicy(IndexPolicy.FORCE);
             con=contentletAPI.checkin(con, user, false);
             if(identifier==null) identifier=con.getIdentifier();
-            contentletAPI.isInodeIndexed(con.getInode());
             APILocator.getVersionableAPI().setLive(con);
             last=con;
         }
@@ -2187,13 +2320,13 @@ public class ContentletAPITest extends ContentletBaseTest {
         // new inode to create a new version
         String newInode=UUIDGenerator.generateUuid();
         existing.setInode(newInode);
+        existing.setIndexPolicy(IndexPolicy.FORCE);
 
         saved=contentletAPI.checkin(existing, user, false);
         
         assertEquals(newInode, saved.getInode());
         assertEquals(identifier, saved.getIdentifier());
 
-        contentletAPI.isInodeIndexed(newInode);
         APILocator.getStructureAPI().delete(testStructure, user);
     }
 
@@ -2241,10 +2374,9 @@ public class ContentletAPITest extends ContentletBaseTest {
         c1.setDateProperty(fieldPubDate.getVelocityVarName(), d1);
         c1.setDateProperty(fieldExpDate.getVelocityVarName(), d2);
         c1.setLanguageId(deflang);
+        c1.setIndexPolicy(IndexPolicy.FORCE);
         c1=APILocator.getContentletAPI().checkin(c1, user, false);
-        boolean isC1Indexed = APILocator.getContentletAPI().isInodeIndexed(c1.getInode());
 
-        Logger.info(this, "IsC1Indexed: " + isC1Indexed);
         Identifier idenFromCache = APILocator.getIdentifierAPI().loadFromCache(c1.getIdentifier());
         Logger.info(this, "IdentifierFromCache:" + idenFromCache);
 
@@ -2266,8 +2398,8 @@ public class ContentletAPITest extends ContentletBaseTest {
         c2.setDateProperty(fieldPubDate.getVelocityVarName(), d3);
         c2.setDateProperty(fieldExpDate.getVelocityVarName(), d4);
         c2.setLanguageId(altlang);
+        c2.setIndexPolicy(IndexPolicy.FORCE);
         c2=APILocator.getContentletAPI().checkin(c2, user, false);
-        APILocator.getContentletAPI().isInodeIndexed(c2.getInode());
 
         Identifier ident2=APILocator.getIdentifierAPI().find(c2);
         assertNotNull(ident2.getSysPublishDate());
@@ -2317,8 +2449,8 @@ public class ContentletAPITest extends ContentletBaseTest {
             Contentlet conn=new Contentlet();
             conn.setStructureInode(testStructure.getInode());
             conn.setStringProperty(field.getVelocityVarName(), letter);
+            conn.setIndexPolicy(IndexPolicy.FORCE);
             conn = contentletAPI.checkin(conn, user, false);
-            contentletAPI.isInodeIndexed(conn.getInode());
             list.add(conn);
         }
         String query = "+structurename:"+testStructure.getVelocityVarName()+
@@ -2781,8 +2913,8 @@ public class ContentletAPITest extends ContentletBaseTest {
             contentletAPI.setContentletProperty(testContentlet, tabDividerField, "tabDividerFieldValue");
 
             // Checking the contentlet
+            testContentlet.setIndexPolicy(IndexPolicy.FORCE);
             testContentlet = contentletAPI.checkin(testContentlet, user, false);
-            contentletAPI.isInodeIndexed(testContentlet.getInode());
         } catch (Exception ex) {
             Logger.error(this, "An error occurred during test_validateContentlet_contentWithTabDividerField", ex);
             throw ex;
@@ -2861,8 +2993,8 @@ public class ContentletAPITest extends ContentletBaseTest {
             contentlet.setBinary(binaryField1.variable(), imageFile);
             contentlet.setBinary(binaryField2.variable(), imageFile);
 
+            contentlet.setIndexPolicy(IndexPolicy.FORCE);
             contentlet = contentletAPI.checkin(contentlet, user, false);
-            contentletAPI.isInodeIndexed(contentlet.getInode());
 
             //Check that the properties still exist.
             assertTrue(contentlet.getMap().containsKey(binaryField1.variable()));
@@ -3061,9 +3193,9 @@ public class ContentletAPITest extends ContentletBaseTest {
 
         contentlet.setDateProperty(fieldToSave.variable(), new Date(new Date().getTime()+60000L));
 
+        contentlet.setIndexPolicy(IndexPolicy.FORCE);
         contentlet = contentletAPI.checkin(contentlet, user, false);
-        contentletAPI.isInodeIndexed(contentlet.getInode());
-        
+
         contentlet = contentletAPI.find(contentlet.getInode(), user, false);
 		Date expireDate = contentlet.getDateProperty("expireDate");
         
@@ -3129,22 +3261,25 @@ public class ContentletAPITest extends ContentletBaseTest {
             contentletA.setStructureInode(contentType.inode());
             contentletA.setLanguageId(languageAPI.getDefaultLanguage().getId());
             contentletA.setStringProperty(textField.variable(), "A");
+            contentletA.setIndexPolicy(IndexPolicy.FORCE);
+            contentletA.setIndexPolicyDependencies(IndexPolicy.FORCE);
             contentletA = contentletAPI.checkin(contentletA, user, false);
-            contentletAPI.isInodeIndexed(contentletA.getInode());
 
             contentletB = new Contentlet();
             contentletB.setStructureInode(contentType.inode());
             contentletB.setLanguageId(languageAPI.getDefaultLanguage().getId());
             contentletB.setStringProperty(textField.variable(), "B");
+            contentletB.setIndexPolicy(IndexPolicy.FORCE);
+            contentletB.setIndexPolicyDependencies(IndexPolicy.FORCE);
             contentletB = contentletAPI.checkin(contentletB, user, false);
-            contentletAPI.isInodeIndexed(contentletB.getInode());
 
             contentletC = new Contentlet();
             contentletC.setStructureInode(contentType.inode());
             contentletC.setLanguageId(languageAPI.getDefaultLanguage().getId());
             contentletC.setStringProperty(textField.variable(), "B");
+            contentletC.setIndexPolicy(IndexPolicy.FORCE);
+            contentletC.setIndexPolicyDependencies(IndexPolicy.FORCE);
             contentletC = contentletAPI.checkin(contentletC, user, false);
-            contentletAPI.isInodeIndexed(contentletC.getInode());
 
             relationShip = createRelationShip(contentType.inode(),
                     contentType.inode(), false);
@@ -3162,9 +3297,9 @@ public class ContentletAPITest extends ContentletBaseTest {
 
             contentletA = contentletAPI.checkout(contentletA.getInode(), user, false);
             contentletA.setStringProperty(textField.variable(), "ABC");
+            contentletA.setIndexPolicy(IndexPolicy.FORCE);
+            contentletA.setIndexPolicyDependencies(IndexPolicy.FORCE);
             contentletA = contentletAPI.checkin(contentletA, relationshipListMap, user, false);
-            contentletAPI.isInodeIndexed(contentletA.getInode());
-
         } catch (Exception e) {
             fail(e.getMessage());
         } finally {
@@ -3305,8 +3440,8 @@ public class ContentletAPITest extends ContentletBaseTest {
             contentlet.setContentTypeId(contentType.inode());
             contentlet.setLanguageId(languageAPI.getDefaultLanguage().getId());
             contentlet.setLongProperty(field.variable(),1);
+            contentlet.setIndexPolicy(IndexPolicy.FORCE);
             contentlet = contentletAPI.checkin(contentlet, user, false);
-            contentletAPI.isInodeIndexed(contentlet.getInode());
             contentlet = contentletAPI.find(contentlet.getInode(), user, false);
 
             Contentlet contentlet2 = new Contentlet();
@@ -3341,8 +3476,8 @@ public class ContentletAPITest extends ContentletBaseTest {
             contentlet.setContentTypeId(contentType.inode());
             contentlet.setLanguageId(languageAPI.getDefaultLanguage().getId());
             contentlet.setStringProperty(field.variable(),"test");
+            contentlet.setIndexPolicy(IndexPolicy.FORCE);
             contentlet = contentletAPI.checkin(contentlet, user, false);
-            contentletAPI.isInodeIndexed(contentlet.getInode());
             contentlet = contentletAPI.find(contentlet.getInode(), user, false);
 
             //Contentlet in Spanish (should not be an issue since the unique is per lang)
@@ -3350,6 +3485,7 @@ public class ContentletAPITest extends ContentletBaseTest {
             contentlet2.setContentTypeId(contentType.inode());
             contentlet2.setLanguageId(2);
             contentlet2.setStringProperty(field.variable(),"test");
+            contentlet2.setIndexPolicy(IndexPolicy.FORCE);
             contentlet2 = contentletAPI.checkin(contentlet2, user, false);
 
             //Contentlet in English (throws the error)
@@ -3357,6 +3493,7 @@ public class ContentletAPITest extends ContentletBaseTest {
             contentlet3.setContentTypeId(contentType.inode());
             contentlet3.setLanguageId(languageAPI.getDefaultLanguage().getId());
             contentlet3.setStringProperty(field.variable(),"test");
+            contentlet3.setIndexPolicy(IndexPolicy.FORCE);
             contentlet3 = contentletAPI.checkin(contentlet3, user, false);
 
 
@@ -3559,6 +3696,8 @@ public class ContentletAPITest extends ContentletBaseTest {
 
             Contentlet checkedoutNewsContent = contentletAPI.checkout(newsContent.getInode(), user, false);
 
+            checkedoutNewsContent.setIndexPolicy(IndexPolicy.FORCE);
+            checkedoutNewsContent.setIndexPolicyDependencies(IndexPolicy.FORCE);
             Contentlet reCheckedinContent = contentletAPI.checkin(checkedoutNewsContent, (ContentletRelationships) null,
                 new ArrayList<>(), null, user, false);
 
@@ -3631,6 +3770,8 @@ public class ContentletAPITest extends ContentletBaseTest {
 
             Contentlet checkedoutNewsContent = contentletAPI.checkout(newsContent.getInode(), user, false);
 
+            checkedoutNewsContent.setIndexPolicy(IndexPolicy.FORCE);
+            checkedoutNewsContent.setIndexPolicyDependencies(IndexPolicy.FORCE);
             Contentlet reCheckedinContent = contentletAPI.checkin(checkedoutNewsContent,
                 (Map<Relationship, List<Contentlet>>) null, new ArrayList<>(), null, user, false);
 
@@ -3710,7 +3851,7 @@ public class ContentletAPITest extends ContentletBaseTest {
 
     @Test
     public void testCheckin1_ExistingContentWithRels_NullRels_ShouldKeepExistingRels()
-        throws DotDataException, DotSecurityException {
+            throws DotDataException, DotSecurityException {
         Contentlet blogContent = null;
         List<Contentlet> relatedContent = null;
 
@@ -3725,9 +3866,11 @@ public class ContentletAPITest extends ContentletBaseTest {
             final List<Category> categories = getACoupleOfCategories();
 
             blogContent = contentletAPI.checkin(blogContent, relationships, categories, null, user,
-                false);
+                    false);
+            blogContent.setIndexPolicy(IndexPolicy.FORCE);
+            blogContent.setIndexPolicyDependencies(IndexPolicy.FORCE);
 
-            contentletAPI.isInodeIndexed(blogContent.getInode());
+            //contentletAPI.isInodeIndexed(blogContent.getInode());
 
             List<Contentlet> relatedContentFromDB = relationshipAPI.dbRelatedContent(relationship, blogContent);
 
@@ -3735,19 +3878,21 @@ public class ContentletAPITest extends ContentletBaseTest {
 
             Contentlet checkedoutBlogContent = contentletAPI.checkout(blogContent.getInode(), user, false);
 
+            checkedoutBlogContent.setIndexPolicy(IndexPolicy.FORCE);
+            checkedoutBlogContent.setIndexPolicyDependencies(IndexPolicy.FORCE);
             Contentlet reCheckedinContent = contentletAPI.checkin(checkedoutBlogContent, (ContentletRelationships) null,
-                null, null, user, false);
+                    null, null, user, false);
 
             List<Contentlet> existingRelationships = relationshipAPI.dbRelatedContent(relationship, reCheckedinContent);
 
             assertTrue(existingRelationships.containsAll(relatedContent));
         } finally {
-                contentletAPI.archive(blogContent, user, false);
-                contentletAPI.delete(blogContent, user, false);
-                for(Contentlet c : relatedContent){
-                    contentletAPI.archive(c, user, false);
-                    contentletAPI.delete(c, user, false);
-                }
+            contentletAPI.archive(blogContent, user, false);
+            contentletAPI.delete(blogContent, user, false);
+            for(Contentlet c : relatedContent){
+                contentletAPI.archive(c, user, false);
+                contentletAPI.delete(c, user, false);
+            }
         }
     }
 
@@ -3766,11 +3911,10 @@ public class ContentletAPITest extends ContentletBaseTest {
             relatedContent = relationships.getRelationshipsRecords().get(0).getRecords();
 
             final List<Category> categories = getACoupleOfCategories();
-
+            blogContent.setIndexPolicy(IndexPolicy.FORCE);
+            blogContent.setIndexPolicyDependencies(IndexPolicy.FORCE);
             blogContent = contentletAPI.checkin(blogContent, relationships, categories, null, user,
                 false);
-
-            contentletAPI.isInodeIndexed(blogContent.getInode());
 
             List<Contentlet> relatedContentFromDB = relationshipAPI.dbRelatedContent(relationship, blogContent);
 
@@ -3778,6 +3922,8 @@ public class ContentletAPITest extends ContentletBaseTest {
 
             Contentlet checkedoutBlogContent = contentletAPI.checkout(blogContent.getInode(), user, false);
 
+            checkedoutBlogContent.setIndexPolicy(IndexPolicy.FORCE);
+            checkedoutBlogContent.setIndexPolicyDependencies(IndexPolicy.FORCE);
             Contentlet reCheckedinContent = contentletAPI.checkin(checkedoutBlogContent, (ContentletRelationships) null,
                 null, null, user, false);
 
@@ -3785,8 +3931,11 @@ public class ContentletAPITest extends ContentletBaseTest {
 
             assertTrue(existingRelationships.containsAll(relatedContent));
         } finally {
-            contentletAPI.archive(blogContent, user, false);
-            contentletAPI.delete(blogContent, user, false);
+
+            if (InodeUtils.isSet(blogContent.getInode())) {
+                contentletAPI.archive(blogContent, user, false);
+                contentletAPI.delete(blogContent, user, false);
+            }
 
             if(UtilMethods.isSet(relatedContent)) {
                 relatedContent.forEach(content -> {
@@ -3813,14 +3962,15 @@ public class ContentletAPITest extends ContentletBaseTest {
             final ContentletRelationships relationships = getACoupleOfChildRelationships(blogContent);
 
             final List<Category> categories = getACoupleOfCategories();
-
+            blogContent.setIndexPolicy(IndexPolicy.FORCE);
+            blogContent.setIndexPolicyDependencies(IndexPolicy.FORCE);
             blogContent = contentletAPI.checkin(blogContent, relationships,
                 categories, null, user, false, false);
 
-            contentletAPI.isInodeIndexed(blogContent.getInode());;
-
             Contentlet checkedoutBlogContent = contentletAPI.checkout(blogContent.getInode(), user, false);
 
+            checkedoutBlogContent.setIndexPolicy(IndexPolicy.FORCE);
+            checkedoutBlogContent.setIndexPolicyDependencies(IndexPolicy.FORCE);
             Contentlet reCheckedinContent = contentletAPI.checkin(checkedoutBlogContent, (ContentletRelationships) null,
                 null, null, user, false, false);
 
@@ -3861,10 +4011,9 @@ public class ContentletAPITest extends ContentletBaseTest {
             relationshipsMap.put(relationships.getRelationshipsRecords().get(0).getRelationship(),
                 relationships.getRelationshipsRecords().get(0).getRecords());
 
+            blogContent.setIndexPolicy(IndexPolicy.FORCE);
             blogContent = contentletAPI.checkin(blogContent, relationshipsMap, categories,
                 null, user,false);
-
-            contentletAPI.isInodeIndexed(blogContent.getInode());
 
             Contentlet checkedoutBlogContent = contentletAPI.checkout(blogContent.getInode(), user, false);
 
@@ -3908,12 +4057,14 @@ public class ContentletAPITest extends ContentletBaseTest {
             relationshipsMap.put(relationships.getRelationshipsRecords().get(0).getRelationship(),
                 relationships.getRelationshipsRecords().get(0).getRecords());
 
+            blogContent.setIndexPolicy(IndexPolicy.FORCE);
+            blogContent.setIndexPolicyDependencies(IndexPolicy.FORCE);
             blogContent = contentletAPI.checkin(blogContent, relationshipsMap, categories, user,false);
-
-            contentletAPI.isInodeIndexed(blogContent.getInode());
 
             Contentlet checkedoutBlogContent = contentletAPI.checkout(blogContent.getInode(), user, false);
 
+            checkedoutBlogContent.setIndexPolicy(IndexPolicy.FORCE);
+            checkedoutBlogContent.setIndexPolicyDependencies(IndexPolicy.FORCE);
             Contentlet reCheckedinContent = contentletAPI.checkin(checkedoutBlogContent,
                 (Map<Relationship, List<Contentlet>>) null, null, user, false);
 
@@ -3953,11 +4104,12 @@ public class ContentletAPITest extends ContentletBaseTest {
             final Map<Relationship, List<Contentlet>> relationshipsMap = new HashMap<>();
             relationshipsMap.put(relationships.getRelationshipsRecords().get(0).getRelationship(),
                 relationships.getRelationshipsRecords().get(0).getRecords());
-
+            blogContent.setIndexPolicy(IndexPolicy.FORCE);
+            blogContent.setIndexPolicyDependencies(IndexPolicy.FORCE);
             blogContent = contentletAPI.checkin(blogContent, relationshipsMap, categories, user,false);
 
-            contentletAPI.isInodeIndexed(blogContent.getInode());
-
+            blogContent.setIndexPolicy(IndexPolicy.FORCE);
+            blogContent.setIndexPolicyDependencies(IndexPolicy.FORCE);
             Contentlet reCheckedinContent = contentletAPI.checkinWithoutVersioning(blogContent,
                 null, null, null, user, false);
 
@@ -4003,10 +4155,9 @@ public class ContentletAPITest extends ContentletBaseTest {
             relationshipsMap.put(relationship,
                 relationshipRecords.getRecords());
 
+            blogContent.setIndexPolicy(IndexPolicy.FORCE);
             blogContent = contentletAPI.checkin(blogContent, relationshipsMap, categories,
                 null, user,false);
-
-            contentletAPI.isInodeIndexed(blogContent.getInode());
 
             Contentlet checkedoutBlogContent = contentletAPI.checkout(blogContent.getInode(), user, false);
 
@@ -4048,9 +4199,8 @@ public class ContentletAPITest extends ContentletBaseTest {
             relationshipsMap.put(relationships.getRelationshipsRecords().get(0).getRelationship(),
                 relationships.getRelationshipsRecords().get(0).getRecords());
 
+            blogContent.setIndexPolicy(IndexPolicy.FORCE);
             blogContent = contentletAPI.checkin(blogContent, relationshipsMap, categories, user,false);
-
-            contentletAPI.isInodeIndexed(blogContent.getInode());
 
             Contentlet checkedoutBlogContent = contentletAPI.checkout(blogContent.getInode(), user, false);
 
@@ -4094,9 +4244,8 @@ public class ContentletAPITest extends ContentletBaseTest {
             relationshipsMap.put(relationships.getRelationshipsRecords().get(0).getRelationship(),
                 relationships.getRelationshipsRecords().get(0).getRecords());
 
+            blogContent.setIndexPolicy(IndexPolicy.FORCE);
             blogContent = contentletAPI.checkin(blogContent, relationshipsMap, categories, user,false);
-
-            contentletAPI.isInodeIndexed(blogContent.getInode());
 
             Contentlet reCheckedinContent = contentletAPI.checkinWithoutVersioning(blogContent,
                 new HashMap<>(), null, null, user, false);
@@ -4190,19 +4339,27 @@ public class ContentletAPITest extends ContentletBaseTest {
         comment1.setStringProperty("title", "comment1");
         comment1.setStringProperty("email", "email");
         comment1.setStringProperty("comment", "comment");
+        comment1.setIndexPolicy(IndexPolicy.FORCE);
+        comment1.setIndexPolicyDependencies(IndexPolicy.FORCE);
 
         comment1 = contentletAPI.checkin(comment1, new HashMap<>(), user, false);
+        comment1.setIndexPolicy(IndexPolicy.FORCE);
+        comment1.setIndexPolicyDependencies(IndexPolicy.FORCE);
 
         Contentlet comment2 = new Contentlet();
         comment2.setContentTypeId(commentsType.id());
         comment2.setStringProperty("title", "comment2");
         comment2.setStringProperty("email", "email");
         comment2.setStringProperty("comment", "comment");
+        comment2.setIndexPolicy(IndexPolicy.FORCE);
+        comment2.setIndexPolicyDependencies(IndexPolicy.FORCE);
 
         comment2 = contentletAPI.checkin(comment2, new HashMap<>(), user, false);
+        comment2.setIndexPolicy(IndexPolicy.FORCE);
+        comment2.setIndexPolicyDependencies(IndexPolicy.FORCE);
 
         records.setRecords(Arrays.asList(comment1, comment2));
-        relationships.setRelationshipsRecords(Collections.singletonList(records));
+        relationships.setRelationshipsRecords(CollectionsUtils.list(records));
 
         return relationships;
     }
@@ -4243,6 +4400,8 @@ public class ContentletAPITest extends ContentletBaseTest {
         blogContent.setStringProperty("author", "systemUser");
         blogContent.setDateProperty("sysPublishDate", new Date());
         blogContent.setStringProperty("body", "blogBody");
+        blogContent.setIndexPolicy(IndexPolicy.FORCE);
+        blogContent.setIndexPolicyDependencies(IndexPolicy.FORCE);
         return blogContent;
     }
 
@@ -4259,6 +4418,8 @@ public class ContentletAPITest extends ContentletBaseTest {
         newsContent.setDateProperty("sysPublishDate", new Date());
         newsContent.setStringProperty("story", "newsStory");
         newsContent.setStringProperty("tags", "test");
+        newsContent.setIndexPolicy(IndexPolicy.FORCE);
+        newsContent.setIndexPolicyDependencies(IndexPolicy.FORCE);
         return newsContent;
     }
 
@@ -4496,8 +4657,35 @@ public class ContentletAPITest extends ContentletBaseTest {
 
     }
 
+    @Test
+    public void test_find_all_lang_contentlet_instances(){
+         //This is the Home Page which is supposed to be part o the starter kit and has both lang-versions.
+         final String identifier  = "a9f30020-54ef-494e-92ed-645e757171c2";
+         final List<Contentlet> contentlets = new ArrayList<>(contentletAPI.findAllLangContentlets(identifier));
+
+        Comparator<Contentlet> comparator
+                = Comparator.comparingLong(Contentlet::getLanguageId);
+
+        Collections.sort(contentlets, comparator);
+
+         assertEquals(contentlets.get(0).getLanguageId(),1L);
+         assertEquals(contentlets.get(0).getIdentifier(),identifier);
+         assertEquals(contentlets.get(1).getLanguageId(),2L);
+         assertEquals(contentlets.get(1).getIdentifier(),identifier);
+    }
 
     @Test
+    public void test_find_all_lang_contentlet_instances_invalid_identifier() {
+
+        final String invalidIdentifier  = "lol";
+        final List<Contentlet> contentlets = new ArrayList<>(contentletAPI.findAllLangContentlets(invalidIdentifier));
+        assertNotNull(contentlets);
+        assertEquals(contentlets.size(),0);
+
+    }
+
+
+        @Test
     public void test_update_mod_date_contentlet_expect_success() throws Exception {
         final int min = 1;
         final int max = 600;

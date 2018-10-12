@@ -22,10 +22,10 @@ import com.dotmarketing.portlets.htmlpageasset.model.HTMLPageAsset;
 import com.dotmarketing.portlets.structure.model.Structure;
 import com.dotmarketing.portlets.templates.model.Template;
 import com.dotmarketing.util.InodeUtils;
+import com.dotmarketing.util.Logger;
 import com.dotmarketing.util.UUIDGenerator;
 import com.dotmarketing.util.UtilMethods;
 import com.liferay.portal.model.User;
-
 import org.junit.Assert;
 import org.junit.BeforeClass;
 import org.junit.Test;
@@ -33,10 +33,7 @@ import org.junit.Test;
 import java.util.ArrayList;
 import java.util.List;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.*;
 
 public class TemplateAPITest extends IntegrationTestBase {
 
@@ -178,8 +175,9 @@ public class TemplateAPITest extends IntegrationTestBase {
             //Create a Page inside the Folder assigned to the newly created Template
             page = new HTMLPageDataGen(folder, template).nextPersisted();
 
+
             //wait a second before attempting to search the pages with elastic search
-            APILocator.getContentletAPI().isInodeIndexed(page.getInode());
+            //APILocator.getContentletAPI().isInodeIndexed(page.getInode());
 
             //Find pages by template
             List<Contentlet> pages = APILocator.getHTMLPageAssetAPI()
@@ -264,6 +262,42 @@ public class TemplateAPITest extends IntegrationTestBase {
         }
     }
 
+    
+    
+    @Test
+    public void testFindWorkingTemplateNoNPE() throws DotDataException, DotSecurityException {
+
+
+        try {
+            final Template template = templateAPI.findWorkingTemplate("NO_TEMPLATE",
+                    APILocator.getUserAPI().getSystemUser(), false);
+
+            assertNull(template);
+
+        }
+        catch(NullPointerException e) {
+            Logger.error(this, "getting non-existant template should not throw an NPE", e);
+            assertTrue("getting non-existant template should not throw an NPE", false);
+        }
+    }
+
+    @Test
+    public void testFindLiveTemplateNoNPE() throws DotDataException, DotSecurityException {
+
+
+        try {
+            final Template template = templateAPI.findLiveTemplate("NO_TEMPLATE",
+                    APILocator.getUserAPI().getSystemUser(), false);
+
+            assertNull(template);
+            
+        }
+        catch(NullPointerException e) {
+            Logger.error(this, "getting non-existant template should not throw an NPE", e);
+            assertTrue("getting non-existant template should not throw an NPE", false);
+        }
+    }
+    
     @Test
     public void testFindTemplatesAssignedTo() throws DotDataException, DotSecurityException {
         final List<Template> result = templateAPI.findTemplatesAssignedTo(host);
